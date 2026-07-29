@@ -335,13 +335,17 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
 
     # The Next.js dashboard (a different origin) posts to /agents/rank/run, so the
     # browser needs CORS. Origins are overridable via API_CORS_ORIGINS (comma-sep).
+    # Default is "*" (allow any origin) because this is a read-only demo API served
+    # on a per-deploy Railway domain the frontend can't know at build time — a
+    # localhost-only default silently blocks the deployed dashboard in the browser
+    # while server-side fetches still work. "*" is valid here precisely because
+    # allow_credentials is NOT set (no cookies/auth) — the wildcard+credentials ban
+    # doesn't apply. Pin API_CORS_ORIGINS to the exact frontend domain(s) to lock down.
     import os
 
     from fastapi.middleware.cors import CORSMiddleware
 
-    origins = os.environ.get(
-        "API_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
-    ).split(",")
+    origins = os.environ.get("API_CORS_ORIGINS", "*").split(",")
 
     # Registered BEFORE CORSMiddleware on purpose: add_middleware prepends, so the
     # later-added CORS layer wraps this one. An unhandled exception would otherwise
