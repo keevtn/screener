@@ -1,0 +1,45 @@
+# Catalyst presets (docs/ROADMAP.md task 5b.3, invariant I11).
+#
+# A preset is a named bundle of catalyst types + stages + thresholds. It COMPILES
+# to a stored filter object consumed identically by the screener, alerts, and the
+# Phase 7 agent candidate filter — one concept, three consumers. Adding a preset
+# here requires zero code changes (it appears via the API and /screener?preset=).
+
+version: 1
+
+presets:
+  earnings_drift:
+    catalyst_types: [earnings_results]
+    stages: [announced, confirmed]
+    min_materiality: 0.50
+
+  ma_watch:
+    catalyst_types: [ma]
+    stages: [rumor, announced, confirmed]
+    min_materiality: 0.60
+
+  dilution_radar:
+    catalyst_types: [secondary_offering]
+    min_materiality: 0.50
+
+  insider_conviction:
+    catalyst_types: [activist_stake, insider_cluster]
+    min_materiality: 0.50
+
+  # High short_float + low shares_float + buzz spike. The buzz term activates at
+  # Phase 6; until then this screens the halt/short-interest catalysts we can see.
+  squeeze_watch:
+    catalyst_types: [halt]
+    min_materiality: 0.40
+    high_alert_only: false
+
+  # IPO lifecycle: primary listings (S-1 / S-1-A / F-1 / 424B4 prospectuses and
+  # "begins trading" headlines classify as `ipo`) plus the computed lockup-expiry
+  # event onboard_listing schedules for a new listing (5b.2). Keep the gate at
+  # 0.40 so lockup_expiry (materiality 0.40) stays in alongside ipo (0.80); stages
+  # left open to catch both scheduled and confirmed. NOTE: the new-listing
+  # cold-start window is a buzz-suppression state on the entity, not a scored
+  # catalyst type, so it isn't a filter term here.
+  ipo_watch:
+    catalyst_types: [ipo, lockup_expiry]
+    min_materiality: 0.40

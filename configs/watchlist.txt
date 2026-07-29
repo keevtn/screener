@@ -1,0 +1,11 @@
+# Always-in-universe tickers, one per line (docs/ROADMAP.md task 0.3).
+# Members here set entities.active regardless of universe.yaml criteria.
+# Blank lines and #-comments are ignored.
+AAPL
+MSFT
+GOOGL
+META
+NVDA
+AMZN
+TSLA
+SPY

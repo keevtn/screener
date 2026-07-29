@@ -1,0 +1,119 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #0a0e1a;
+  color: #e2e8f0;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+  /* Don't let iOS Safari inflate font sizes in landscape. */
+  -webkit-text-size-adjust: 100%;
+  /* Guard against any single wide child forcing a horizontal scroll on phones. */
+  overflow-x: hidden;
+}
+
+/* Full-height app shell. `100vh` is wrong on mobile browsers (it ignores the
+   address bar, so the bottom of the UI gets clipped); `100dvh` tracks the
+   actual visible viewport. The vh line is a fallback for older engines. */
+.app-shell {
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* Comfortable touch targets on coarse pointers (phones/tablets). */
+@media (pointer: coarse) {
+  button,
+  a,
+  input[type="checkbox"],
+  input[type="radio"] {
+    touch-action: manipulation;
+  }
+}
+
+/* thin scrollbar for sidebar + feed */
+.scrollbar-thin::-webkit-scrollbar        { width: 4px; }
+.scrollbar-thin::-webkit-scrollbar-track  { background: transparent; }
+.scrollbar-thin::-webkit-scrollbar-thumb  { background: #1e2d4a; border-radius: 2px; }
+
+/* line-clamp helpers (used by news cards) */
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ---- Accessibility ---- */
+:focus-visible {
+  outline: 2px solid #00d4aa;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  left: 0.5rem;
+  top: 0.5rem;
+  z-index: 100;
+  padding: 0.5rem 0.875rem;
+  background: #00d4aa;
+  color: #07101e;
+  font-weight: 600;
+  border-radius: 4px;
+  transform: translateY(-200%);
+  transition: transform 0.15s ease;
+}
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+/* ============================================================
+   TAPE_ — Screener Suite terminal surface (scoped under .tape)
+   Kept separate from the fin-* news-feed theme above so the two
+   surfaces never bleed into each other.
+   ============================================================ */
+.tape {
+  --tape-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --tape-sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --accent: #4fd1c5;
+  --bull: #34d399;
+  --bear: #fb7185;
+  --warn: #f0b44a;
+  background: #07090d;
+  color: #e6eaf2;
+  font-family: var(--tape-sans);
+}
+.tape-mono { font-family: var(--tape-mono); }
+
+/* Glow used only for live-state indicators, per the design brief. */
+@keyframes tape-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.tape-pulse { animation: tape-pulse 2s infinite; }
+.tape-pulse-fast { animation: tape-pulse 1.6s infinite; }
+
+/* Horizontal column-group scroller: thin rail, hidden until hover on fine
+   pointers so the fade-edge affordance carries the "scroll →" hint. */
+.tape-xscroll { scrollbar-width: thin; scrollbar-color: #2a3242 transparent; }
+.tape-xscroll::-webkit-scrollbar { height: 6px; }
+.tape-xscroll::-webkit-scrollbar-track { background: transparent; }
+.tape-xscroll::-webkit-scrollbar-thumb { background: #1c2230; border-radius: 3px; }
+.tape-xscroll:hover::-webkit-scrollbar-thumb { background: #2a3242; }
+
+.tape :focus-visible { outline: 2px solid #4fd1c5; outline-offset: 2px; border-radius: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

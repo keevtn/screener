@@ -1,0 +1,56 @@
+# Source provenance tiers (docs/ROADMAP.md task 2.3). Lower tier = more
+# authoritative. Cluster origin = earliest published_at; tier breaks ties.
+# Matching is case-insensitive substring against the raw_items.source label.
+
+version: 1
+
+tiers:
+  # 0 — primary documents (the filing/action itself)
+  0:
+    - "SEC EDGAR"
+    - "FDA "
+    - "FDA Press"
+    - "FDA MedWatch"
+    - "FDA Adverse"
+    - "Enforcement"
+  # 1 — origin wires (issuer-paid distribution; the press release's first hop)
+  1:
+    - "Business Wire"
+    - "Businesswire"
+    - "PR Newswire"
+    - "PRNewswire"
+    - "GlobeNewswire"
+    - "Globe Newswire"
+    - "ACCESSWIRE"
+    - "Accesswire"
+    - "Newsfile"
+  # 2 — original journalism
+  2:
+    - "Reuters"
+    - "Bloomberg"
+    - "CNBC"
+    - "Wall Street Journal"
+    - "Financial Times"
+    - "Associated Press"
+    - "MarketWatch"
+    - "Barron"
+    - "Stock Titan"
+    - "CFTC"
+  # 3 — aggregators / rehosts (Finviz's news feed, if ever ingested, is tier 3)
+  3:
+    - "Yahoo Finance"
+    - "Seeking Alpha"
+    - "Benzinga"
+    - "Zacks"
+    - "Motley Fool"
+    - "InvestorPlace"
+    - "Nasdaq"
+    - "Finviz"
+    - "Reddit"
+
+# Tier for a source that matches no pattern (unknown wire/outlet).
+default_tier: 2
+
+# What the scorer does with tier-3 clusters: "down_weight" or "drop" (a config
+# field, honored downstream in aggregation — not hardcoded here).
+tier3_handling: down_weight

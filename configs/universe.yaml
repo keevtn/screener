@@ -1,0 +1,31 @@
+# Tradeable-universe definition (docs/ROADMAP.md task 0.3 / materialized in 0.6).
+#
+# The universe is CRITERIA-DEFINED, not an index list. Membership only sets
+# entities.active; the entity backbone (all CIK<->ticker seeds) is loaded
+# regardless. "S&P 500" is explicitly NOT the definition.
+#
+# v1 starting point (deliberately narrow; widened downward as enrichment proves
+# itself — ROADMAP-NOTE): US common stocks, cap floor $2B, plus everything in
+# watchlist.txt (always included regardless of criteria).
+
+version: 1
+
+criteria:
+  # Security type gate — US common stock only (no ETFs, funds, warrants, units).
+  security_types: [common]
+  countries: [USA]
+
+  # Numeric floors. Fields resolve against a fundamentals snapshot (0.6);
+  # price/dollar-volume against our own cached daily bars (0.4).
+  market_cap_min: 2_000_000_000      # $2B
+  price_min: 1.00                    # penny-stock floor
+  avg_dollar_volume_min: 1_000_000   # $1M/day, 20-session average
+
+# Members here are ALWAYS included, criteria notwithstanding (watchlist.txt is
+# the newline-delimited companion; this inline list is for one-offs).
+always_include: []
+
+# Diff gating: a monthly membership change larger than this fraction lands in a
+# pending-review state instead of auto-applying (a large jump poisons buzz
+# baselines + entity stats). Consumed by scripts/snapshot_universe.py (0.6).
+diff_review_threshold: 0.10

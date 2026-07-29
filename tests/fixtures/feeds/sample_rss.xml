@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Test Newswire</title>
+    <item>
+      <title>Apple beats earnings expectations</title>
+      <link>https://example.com/apple-earnings</link>
+      <guid isPermaLink="false">guid-rss-apple-1</guid>
+      <pubDate>Wed, 12 Mar 2025 14:00:00 GMT</pubDate>
+      <description>Apple reported record quarterly revenue.</description>
+    </item>
+    <item>
+      <title>Tesla announces recall</title>
+      <link>https://example.com/tesla-recall</link>
+      <guid isPermaLink="false">guid-rss-tesla-2</guid>
+      <pubDate>Wed, 12 Mar 2025 15:30:00 GMT</pubDate>
+      <description>Tesla recalls a batch of vehicles.</description>
+    </item>
+  </channel>
+</rss>

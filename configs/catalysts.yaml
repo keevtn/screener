@@ -1,0 +1,142 @@
+# Catalyst taxonomy (docs/ROADMAP.md task 3.2, invariant I11).
+#
+# Data-defined: adding a catalyst type or tuning detection here requires ZERO
+# changes to the classifier (pipeline.score.catalysts). Each type declares its
+# detection rules (SEC form types, EDGAR item codes, keyword patterns), a default
+# materiality, a direction hint, valid stages, and a predictive flag.
+#
+# Detection: a cluster matches a type if ANY of — its origin's SEC filing_type is
+# in `filing_types`, an `edgar_items` code appears in the text, or any `keywords`
+# (or a direction/stage keyword subset) appears. Types are evaluated top-to-bottom;
+# the first match wins, so put the most specific/reliable types first.
+
+version: 1
+high_alert_cutoff: 0.70   # materiality >= cutoff -> high_alert
+
+catalysts:
+  # --- M&A: stage-aware, role-dependent direction ---------------------------
+  ma:
+    default_materiality: 0.90
+    direction_hint: reaction_dependent
+    predictive: true
+    stages: [rumor, announced, confirmed, closed]
+    detection:
+      filing_types: ["S-4", "DEFM14A", "SC TO-T", "SC TO-I"]
+      edgar_items: ["1.01"]
+      keywords_announced:
+        ["to acquire", "acquires", "acquisition of", "announces acquisition",
+         "agrees to buy", "to purchase", "merger agreement", "definitive agreement",
+         "to be acquired", "tender offer", "to merge with"]
+      keywords_rumor:
+        ["exploring strategic alternatives", "in talks", "reportedly in",
+         "considering a sale", "approached about", "reported talks", "weighing a sale"]
+
+  # --- Earnings: three SEPARATE types, never merged -------------------------
+  earnings_results:
+    default_materiality: 0.60
+    direction_hint: reaction_dependent
+    reaction_dependent: true   # 3.4 — text direction is level, not surprise
+    predictive: true
+    stages: [scheduled, confirmed]
+    detection:
+      filing_types: ["10-K", "10-Q"]
+      edgar_items: ["2.02"]
+      keywords:
+        ["quarterly results", "reports first quarter", "reports second quarter",
+         "reports third quarter", "reports fourth quarter", "quarterly earnings",
+         "reports q", "fiscal year results", "eps of", "earnings per share"]
+
+  guidance_change:
+    default_materiality: 0.75
+    direction_hint: reaction_dependent
+    predictive: true
+    detection:
+      keywords_bullish:
+        ["raises guidance", "raises outlook", "boosts forecast", "raises forecast",
+         "increases guidance", "lifts guidance", "raises full-year"]
+      keywords_bearish:
+        ["cuts guidance", "lowers guidance", "lowers outlook", "withdraws guidance",
+         "slashes forecast", "cuts forecast", "warns on", "guides below"]
+
+  product_pricing:
+    default_materiality: 0.45
+    direction_hint: none
+    predictive: true
+    detection:
+      keywords:
+        ["price increase", "raises prices", "cuts prices", "price cut",
+         "launches", "unveils", "new pricing", "discontinues"]
+
+  # --- Capital structure -----------------------------------------------------
+  secondary_offering:
+    default_materiality: 0.70
+    direction_hint: bearish   # rule-detectable dilution
+    predictive: true
+    detection:
+      filing_types: ["S-3", "424B5", "424B3"]
+      keywords:
+        ["public offering", "proposed offering", "secondary offering",
+         "prices offering", "registered direct", "at-the-market offering", "atm offering"]
+
+  activist_stake:
+    default_materiality: 0.70
+    direction_hint: bullish
+    predictive: true
+    detection:
+      filing_types: ["SC 13D", "SC 13D/A"]
+      keywords: ["activist stake", "13d filing", "urges the board", "nominates directors"]
+
+  insider_cluster:
+    default_materiality: 0.50
+    direction_hint: bullish
+    predictive: true
+    detection:
+      filing_types: ["4"]
+      keywords: ["insider buying", "insider purchase", "cluster of insider"]
+
+  index_change:
+    default_materiality: 0.60
+    direction_hint: none
+    predictive: true
+    detection:
+      keywords:
+        ["added to the s&p", "join the s&p", "index inclusion", "removed from the s&p",
+         "index reconstitution", "added to the nasdaq 100"]
+
+  # --- FDA: approval vs negative action --------------------------------------
+  fda_action:
+    default_materiality: 0.85
+    direction_hint: reaction_dependent
+    predictive: true
+    detection:
+      keywords_bullish:
+        ["fda approves", "fda approval", "receives approval", "grants approval",
+         "clears", "granted clearance", "positive opinion", "breakthrough therapy"]
+      keywords_bearish:
+        ["complete response letter", "crl", "fda rejects", "warning letter",
+         "clinical hold", "fails to meet", "recall", "adcomm votes against"]
+
+  halt:
+    default_materiality: 0.50
+    direction_hint: none
+    predictive: true
+    detection:
+      keywords: ["trading halt", "halted", "resumes trading", "circuit breaker"]
+
+  # --- Calendar-only (non-predictive) ---------------------------------------
+  ipo:
+    default_materiality: 0.80   # high materiality (major event) but NOT gradable
+    direction_hint: none
+    predictive: false           # calendar-only: no ticker/bars/contract (I-note)
+    stages: [scheduled, confirmed]
+    detection:
+      filing_types: ["S-1", "S-1/A", "F-1", "424B4"]
+      keywords: ["initial public offering", "ipo prices", "begins trading", "prices its ipo"]
+
+  lockup_expiry:
+    default_materiality: 0.40
+    direction_hint: bearish
+    predictive: true
+    stages: [scheduled]
+    detection:
+      keywords: ["lockup expiration", "lock-up expiry", "lockup expires"]

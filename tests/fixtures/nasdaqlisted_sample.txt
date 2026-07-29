@@ -1,0 +1,6 @@
+Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares
+AAPL|Apple Inc. - Common Stock|Q|N|N|100|N|N
+ZXYW|Test Issue Co|Q|Y|N|100|N|N
+QQQ|Invesco QQQ Trust|Q|N|N|100|Y|N
+MSFT|Microsoft Corp - Common Stock|Q|N|N|100|N|N
+File Creation Time: 0101202512:00|||||||

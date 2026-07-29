@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>FDA Press Announcements</title>
+    <item>
+      <title>FDA approves new therapy</title>
+      <link>https://www.fda.gov/news/approval-xyz</link>
+      <guid isPermaLink="false">fda-press-xyz-1</guid>
+      <pubDate>Wed, 12 Mar 2025 12:00:00 GMT</pubDate>
+      <description>The FDA today approved a new therapy.</description>
+    </item>
+  </channel>
+</rss>

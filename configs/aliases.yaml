@@ -1,0 +1,13 @@
+# Manual alias overrides: {alias -> canonical ticker} (docs/ROADMAP.md task 0.3).
+#
+# Mechanical aliases (strip Inc./Corp./Co./The, fold dual-class tickers) are
+# derived automatically in pipeline.common.entities.build_entities. This file is
+# for the cases mechanical stripping misses — common trade names that don't
+# survive suffix removal (mechanical strip of "Meta Platforms, Inc." yields
+# "Meta Platforms", not "Meta"). Grows from the Phase 2.4 unmapped log.
+
+overrides:
+  Alphabet: GOOGL      # dual-class parent; canonical line is GOOGL (0.3 rule)
+  Google: GOOGL
+  Meta: META           # trade name; title is "Meta Platforms, Inc."
+  Facebook: META

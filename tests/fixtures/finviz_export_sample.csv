@@ -1,0 +1,6 @@
+"Ticker","Sector","Industry","Country","Market Cap","Price","Average Volume","Shares Float","Short Float","Insider Ownership","Institutional Ownership","Beta"
+"BIGCAP","Technology","Software","USA","5.00B","120.00","2,000,000","40.00M","3.50%","1.20%","72.00%","1.10"
+"SMALLCAP","Healthcare","Biotechnology","USA","900.00M","8.00","500,000","30.00M","12.00%","5.00%","40.00%","1.80"
+"PENNY","Basic Materials","Gold","USA","3.00B","0.75","10,000,000","200.00M","20.00%","2.00%","15.00%","2.30"
+"THIN","Industrials","Airlines","USA","4.00B","50.00","5,000","10.00M","1.00%","0.50%","80.00%","1.05"
+"FOREIGN","Technology","Semiconductors","China","6.00B","40.00","3,000,000","500.00M","0.80%","0.10%","55.00%","0.95"

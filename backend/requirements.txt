@@ -1,0 +1,19 @@
+# Pinned for reproducible installs — the exact versions this code is tested
+# against. Bump deliberately and re-test rather than letting them float.
+
+# Core ingestion pipeline
+aiohttp==3.13.5
+feedparser==6.0.12
+python-dateutil==2.9.0.post0
+certifi==2026.6.17     # CA bundle for TLS validation (fixes CFTC / Stock Titan certs)
+
+# Sentiment analysis — install the one you want to use (see sentiment.py)
+vaderSentiment==3.3.2   # VaderSentimentAnalyzer  (lightweight fallback)
+# transformers          # FinBERTAnalyzer          (recommended — uncomment + install torch)
+# torch                 # required by transformers
+
+# Storage backends
+motor==3.7.1            # MongoHandler  (async MongoDB)
+pymongo[srv]==4.17.0    # required for mongodb+srv:// Atlas URIs
+redis==8.0.0            # RedisHandler  (async Redis)
+python-dotenv==1.2.2    # loads .env into os.environ at startup

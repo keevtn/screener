@@ -1,0 +1,74 @@
+# Environment variables — never commit credentials
+# Ignore every .env variant, but keep the sanitized template.
+.env
+.env.*
+*.env
+!.env.example
+
+# Secret material of any kind
+*.pem
+*.key
+*.pfx
+*.p12
+*.keystore
+id_rsa*
+*.crt
+*credentials*
+*secret*
+service-account*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv-*/
+
+# Node
+node_modules/
+.next/
+next-env.d.ts
+*.tsbuildinfo
+
+# Ingestion CSV dumps (but keep test golden files)
+*.csv
+!tests/fixtures/**/*.csv
+
+# Pipeline local artifacts: parquet bar cache, local SQLite DBs
+data/
+*.sqlite3
+*.db
+
+# Coverage
+.coverage
+htmlcov/
+
+# Obsidian vault config (docs/ is a vault; keep the notes, drop the app state)
+docs/.obsidian/
+.obsidian/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Claude Code local settings (keep launch.json, drop machine-local state)
+.claude/settings.local.json
+.claude/*.local.json
+
+# Python build/test artifacts
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+docs/timeline_audit.md
+docs/clean_repo_railway_plan.md
+data/bars_intraday/
+
+# sim mockup / driver run logs (local only)
+logs/
+data/bluesky_firehose.json

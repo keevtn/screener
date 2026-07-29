@@ -1,0 +1,107 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pipeline"
+version = "0.1.0"
+description = "Market News Prediction Pipeline — deterministic ingest/enrich/score/signal/grade spine (docs/ROADMAP.md)"
+requires-python = ">=3.12"
+# ROADMAP-NOTE: dependencies added phase-by-phase per docs/ROADMAP.md section 4.
+# Phase 0 set below, plus Phase 1 (feedparser/apscheduler) as the ingestion refit
+# lands. rapidfuzz/pyyaml in Phase 2; fastapi/uvicorn in Phase 5; anthropic in
+# Phase 7. The legacy ingestion in backend/ keeps its own backend/requirements.txt
+# (aiohttp stack) but now also imports this package (edgar UA + rate limiter).
+dependencies = [
+    "pydantic>=2",
+    "sqlalchemy>=2.0",
+    "httpx",
+    "pandas",
+    "numpy",
+    "yfinance",
+    "pyarrow",
+    "python-dotenv",
+    # Phase 1 ingestion (feedparser is already provided by backend/requirements).
+    "apscheduler",
+    "feedparser",
+    # ROADMAP-NOTE: pyyaml is listed for Phase 2 in the roadmap dep table, but the
+    # config files it parses (configs/universe.yaml, aliases.yaml) land in Phase 0
+    # (tasks 0.3/0.6), so it is pulled forward here.
+    "pyyaml",
+    # Phase 2 enrichment: alias matching + near-duplicate headline similarity.
+    "rapidfuzz",
+    # Phase 5 read-only API.
+    "fastapi",
+    "uvicorn",
+    # Phase 7 agent layer (ranker + analyst). The signal spine never calls it (I6).
+    "anthropic",
+    # Ingestion runtime (backend/ RSS/EDGAR/social extractors the pipeline dispatches
+    # into). Pinned set lives in backend/requirements.txt; these three are the eager
+    # imports the ingest loop needs at runtime. The Mongo/Redis storage backends from
+    # that file are deliberately NOT here — this deployment drops the external archive
+    # and serves the LIVE feed straight from raw_items (see docs/ARCHITECTURE.md).
+    "aiohttp",
+    "python-dateutil",
+    "certifi",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "respx",
+    "freezegun",
+    "coverage[toml]",
+    "ruff",
+]
+# Claude-plan LLM backend (CLAUDE_API=false in .env): the official Agent
+# SDK authenticating via `claude setup-token` instead of metered API credits.
+# NOTE: its dep tree pulls a starlette newer than fastapi's pin — after
+# installing, re-run `pip install "starlette>=0.40,<0.42"` (the conflict only
+# affects MCP-over-SSE paths this backend never uses).
+subscription = [
+    "claude-agent-sdk",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -m 'not live'"
+markers = [
+    "live: hits real network; excluded by default (no network in CI, ever)",
+]
+asyncio_mode = "auto"
+filterwarnings = [
+    # starlette/fastapi call asyncio.iscoroutinefunction (deprecated in 3.14+).
+    "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["src/pipeline"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+# ROADMAP-NOTE: global floor 75% per roadmap section 6; the 90% floors for
+# common/, grade/, signal/ are enforced in the Makefile `test` target once
+# those packages contain code (a fail_under here would fail on the empty
+# scaffold).
+
+[tool.ruff]
+# ROADMAP-NOTE: lint scope is the new spine only; backend/ and middleware/ are
+# legacy (working, test-backfilled in Phase 1) and are onboarded to ruff when
+# they are refit, not before — avoids churning working code.
+include = ["src/**/*.py", "tests/**/*.py", "scripts/**/*.py"]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "DTZ"]
+# DTZ (flake8-datetimez) enforces I1: no naive datetimes, no datetime.now()
+# without tz — the roadmap confines now() to common/timeutil.py.
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["DTZ"]  # freezegun tests construct fixed datetimes freely
+"src/pipeline/api/*" = ["B008"]  # FastAPI's Depends()-in-defaults is the idiom
