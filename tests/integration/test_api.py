@@ -134,6 +134,37 @@ def test_predictions_filter_and_paginate(engine):
     assert by_id["p-open"]["graded_at"] is None
 
 
+def test_predictions_carry_origin_context_and_lane_filter(engine):
+    """LEDGER lanes: /predictions LEFT-JOINs the companion prediction_context so each
+    row carries its origin-news (source_class / headline / url / source) in one shape,
+    and ?source_class= filters to a lane. Context is written by the arm-time backfill
+    from the cluster/raw_items join (I8: structured-only, so there is no social lane)."""
+    from pipeline.common.prediction_context import backfill_prediction_context
+
+    _seed(engine)
+    with Session(engine) as s:
+        assert backfill_prediction_context(s) == 1  # only p-graded resolves (p-open has no clusters)
+
+    client = _client(engine)
+    by_id = {p["prediction_id"]: p for p in client.get("/predictions").json()["items"]}
+    g = by_id["p-graded"]
+    assert g["source_class"] == "structured"
+    assert g["headline"] == "Apple news"
+    assert g["url"] == "https://x/r1"
+    assert g["source"] == "Reuters"
+    # p-open has empty evidence -> no origin resolvable -> honest nulls, still listed.
+    assert by_id["p-open"]["source_class"] is None
+    assert by_id["p-open"]["headline"] is None
+
+    # Lane filter: STRUCTURED returns the resolved row; SOCIAL is empty (I8).
+    structured = client.get("/predictions", params={"source_class": "structured"}).json()
+    assert structured["count"] == 1 and structured["items"][0]["prediction_id"] == "p-graded"
+    social = client.get("/predictions", params={"source_class": "social"}).json()
+    assert social["count"] == 0 and social["items"] == []
+    # Unknown lane value is rejected.
+    assert client.get("/predictions", params={"source_class": "bogus"}).status_code == 422
+
+
 def test_intraday_live_degrades_without_redis(engine, monkeypatch):
     # Redis down -> live:false + empty items; the panel falls back to client bucketing.
     import pipeline.common.events as ev

@@ -50,6 +50,7 @@ from pipeline.common.config import get_or_create_config  # noqa: E402
 from pipeline.common.db import ensure_indexes, make_engine  # noqa: E402
 from pipeline.common.events import publish_event  # noqa: E402
 from pipeline.common.models import Entity, Prediction, SignalObservation  # noqa: E402
+from pipeline.common.prediction_context import backfill_prediction_context  # noqa: E402
 from pipeline.enrich.backfill import backfill_enrichment  # noqa: E402
 from pipeline.enrich.resolve import EntityResolver  # noqa: E402
 from pipeline.enrich.tiers import load_source_tiers  # noqa: E402
@@ -354,6 +355,16 @@ def run_cycle(
             _step("extended_postmarket", _extended_postmarket, session=s)
         if heavy:
             _step("attention", _attention, session=s)
+
+        # Arm-time origin-news context: carry each new prediction's source_class /
+        # headline / url into the companion table (LEDGER lanes). Incremental +
+        # idempotent (only predictions missing a row), so it stays cheap per cycle.
+        # After baselines so shadows inherit their real pred's origin the same cycle.
+        _step(
+            "context",
+            lambda: f"{backfill_prediction_context(s)} contexts",
+            session=s,
+        )
 
         preds = s.execute(select(func.count()).select_from(Prediction)).scalar_one()
         obs = s.execute(select(func.count()).select_from(SignalObservation)).scalar_one()

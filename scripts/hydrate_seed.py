@@ -5,10 +5,13 @@ EMPTY. This copies the shipped demo history (prediction ledger, graded outcomes,
 attention chart, universe, paper-trading report cards, AI proposals — everything
 in seed/pipeline_seed.db) into the live DB, ONCE, and never on top of real data.
 
-Idempotency: if the live ledger already has rows (predictions > 0) we skip, so a
-restart never double-seeds and never clobbers history the running pipeline has
-since accumulated. Pass --force to seed anyway (INSERT OR IGNORE, so existing PKs
-are preserved regardless).
+Idempotency: seeding is gated PER TABLE on emptiness — a table is seeded only when
+the live one is empty, so a restart never double-seeds and never clobbers history
+the running pipeline has since accumulated. This also means a table added AFTER the
+volume was first hydrated (e.g. prediction_context, the LEDGER-lane companion) is
+still seeded on the next boot instead of staying forever empty behind an
+already-populated ledger. Pass --force to seed every table regardless (INSERT OR
+IGNORE, so existing PKs are preserved).
 
 Seed source: the committed seed/pipeline_seed.db by default. If it is absent and
 $SEED_DB_URL (or --seed-url) is set, the seed is downloaded there first (httpx,
@@ -99,13 +102,14 @@ def main() -> None:
     con = sqlite3.connect(live_path)
     con.execute("PRAGMA foreign_keys=OFF")
     try:
-        have = con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        if ("predictions",) in have and not args.force:
+        have = {
+            r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        if "predictions" in have and not args.force:
             n = con.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
             if n > 0:
-                print(f"[hydrate] live ledger already has {n:,} predictions; skipping "
-                      "(use --force to seed anyway)")
-                return
+                print(f"[hydrate] live ledger already has {n:,} predictions; seeding only "
+                      "still-empty tables (use --force to seed all)")
 
         con.execute(f"ATTACH DATABASE '{seed.resolve().as_posix()}' AS seed")
         seed_tables = [
@@ -115,10 +119,23 @@ def main() -> None:
                 "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
         ]
+        # PER-TABLE emptiness gate (replaces the old all-or-nothing skip): seed a
+        # table only when the live one is EMPTY, so a restart never clobbers history
+        # the running pipeline has accumulated — but a table added AFTER the volume
+        # was first hydrated (e.g. prediction_context, the LEDGER-lane companion)
+        # still receives its backfilled rows instead of staying forever empty.
+        # --force seeds every table regardless (INSERT OR IGNORE preserves live PKs).
         inserted: dict[str, int] = {}
+        skipped: list[str] = []
         with con:
             for t in seed_tables:
+                if t not in have:
+                    skipped.append(t)  # live schema predates this seed table — skip safely
+                    continue
                 before = con.execute(f'SELECT COUNT(*) FROM main."{t}"').fetchone()[0]
+                if before > 0 and not args.force:
+                    skipped.append(t)  # live history present — don't clobber
+                    continue
                 con.execute(f'INSERT OR IGNORE INTO main."{t}" SELECT * FROM seed."{t}"')
                 after = con.execute(f'SELECT COUNT(*) FROM main."{t}"').fetchone()[0]
                 inserted[t] = after - before
@@ -126,10 +143,13 @@ def main() -> None:
 
         violations = con.execute("PRAGMA foreign_key_check").fetchall()
         total = sum(inserted.values())
-        print(f"[hydrate] inserted {total:,} rows across {len(seed_tables)} tables from {seed}")
-        for t in sorted(inserted, key=lambda k: -inserted[k]):
-            if inserted[t]:
-                print(f"[hydrate]   {t:<28} +{inserted[t]:,}")
+        filled = {t: n for t, n in inserted.items() if n}
+        print(
+            f"[hydrate] inserted {total:,} rows across {len(filled)} tables from {seed} "
+            f"({len(skipped)} already-populated/absent tables skipped)"
+        )
+        for t in sorted(filled, key=lambda k: -filled[k]):
+            print(f"[hydrate]   {t:<28} +{filled[t]:,}")
         if violations:
             print(f"[hydrate] WARNING: {len(violations)} foreign-key violations: {violations[:5]}",
                   file=sys.stderr)

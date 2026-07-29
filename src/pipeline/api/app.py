@@ -54,6 +54,7 @@ from pipeline.common.models import (
     LlmSpend,
     PendingChange,
     Prediction,
+    PredictionContext,
     PremarketPanel,
     Ranking,
     RankingRun,
@@ -99,6 +100,12 @@ class PredictionOut(BaseModel):
     realized_adjusted_return: float | None = None
     graded_at: datetime | None = None  # when the grader resolved it (for "newly graded" badges)
     evidence: dict[str, Any] = {}
+    # Origin-news context from the companion table (LEDGER lanes). null when the
+    # originating cluster couldn't be resolved — honest, never guessed.
+    source_class: str | None = None  # 'structured' | 'social' | 'mixed' — the lane
+    headline: str | None = None  # originating article title
+    url: str | None = None  # originating article link (rendered as a safe external link)
+    source: str | None = None  # originating source name
 
 
 class PredictionPage(BaseModel):
@@ -310,7 +317,7 @@ def _ranking_run_out(run: RankingRun, items: list[Ranking]) -> RankingRunOut:
     )
 
 
-def _prediction_out(p: Prediction) -> PredictionOut:
+def _prediction_out(p: Prediction, ctx: PredictionContext | None = None) -> PredictionOut:
     return PredictionOut(
         prediction_id=p.prediction_id,
         ticker=p.ticker,
@@ -325,6 +332,10 @@ def _prediction_out(p: Prediction) -> PredictionOut:
         realized_adjusted_return=p.realized_adjusted_return,
         graded_at=p.graded_at,
         evidence=p.evidence_json or {},
+        source_class=ctx.source_class if ctx else None,
+        headline=ctx.headline if ctx else None,
+        url=ctx.url if ctx else None,
+        source=ctx.source if ctx else None,
     )
 
 
@@ -417,9 +428,19 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
         config_version: str | None = None,
         status: str | None = None,
         outcome: str | None = None,
-        limit: int = Query(50, ge=1, le=500),
+        source_class: str | None = None,
+        limit: int = Query(50, ge=1, le=1000),
         offset: int = Query(0, ge=0),
     ) -> PredictionPage:
+        """The prediction ledger. Each row carries its origin-news context
+        (source_class / headline / url / source) via a single LEFT JOIN to the
+        companion table — no N+1 lookups. ``source_class`` filters to a LEDGER lane
+        (structured|social|mixed); predictions with no resolved origin are excluded
+        from a lane filter but still counted under no filter."""
+        if source_class is not None and source_class not in ("structured", "social", "mixed"):
+            raise HTTPException(
+                status_code=422, detail="source_class must be structured|social|mixed"
+            )
         conds = []
         if ticker:
             conds.append(Prediction.ticker == ticker)
@@ -429,21 +450,30 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
             conds.append(Prediction.status == status)
         if outcome:
             conds.append(Prediction.outcome == outcome)
-        count = session.execute(
-            select(func.count()).select_from(Prediction).where(*conds)
-        ).scalar_one()
-        rows = (
-            session.execute(
-                select(Prediction)
+        # A lane filter needs an INNER join (only resolved rows have a source_class);
+        # otherwise a LEFT join so every ledger row still renders, context or not.
+        if source_class is not None:
+            conds.append(PredictionContext.source_class == source_class)
+            count_stmt = (
+                select(func.count())
+                .select_from(Prediction)
+                .join(PredictionContext, PredictionContext.prediction_id == Prediction.prediction_id)
                 .where(*conds)
-                .order_by(Prediction.issued_at.desc())
-                .limit(limit)
-                .offset(offset)
             )
-            .scalars()
-            .all()
-        )
-        return PredictionPage(count=count, items=[_prediction_out(p) for p in rows])
+        else:
+            count_stmt = select(func.count()).select_from(Prediction).where(*conds)
+        count = session.execute(count_stmt).scalar_one()
+        rows = session.execute(
+            select(Prediction, PredictionContext)
+            .outerjoin(
+                PredictionContext, PredictionContext.prediction_id == Prediction.prediction_id
+            )
+            .where(*conds)
+            .order_by(Prediction.issued_at.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        return PredictionPage(count=count, items=[_prediction_out(p, ctx) for p, ctx in rows])
 
     @app.get("/metrics", response_model=list[MetricsOut])
     def get_metrics(session: Session = Depends(get_session)) -> list[MetricsOut]:

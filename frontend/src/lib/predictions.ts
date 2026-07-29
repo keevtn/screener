@@ -42,6 +42,11 @@ export interface LedgerPrediction {
   outcome: string | null; // correct | incorrect | expired
   realized_adjusted_return: number | null;
   graded_at: string | null; // set when the grader resolved it (drives the "newly graded" badge)
+  // Origin-news context (companion table) — the LEDGER lane + article link.
+  source_class: string | null; // "structured" | "social" | "mixed" | null (unresolved)
+  headline: string | null; // originating article title
+  url: string | null; // originating article link
+  source: string | null; // originating source name
 }
 
 export interface LedgerResult {
@@ -51,12 +56,13 @@ export interface LedgerResult {
 }
 
 export async function fetchLedger(
-  opts: { status?: string; outcome?: string; limit?: number } = {},
+  opts: { status?: string; outcome?: string; sourceClass?: string; limit?: number } = {},
 ): Promise<LedgerResult> {
   const p = new URLSearchParams();
   p.set("limit", String(opts.limit ?? 200));
   if (opts.status) p.set("status", opts.status);
   if (opts.outcome) p.set("outcome", opts.outcome);
+  if (opts.sourceClass) p.set("source_class", opts.sourceClass);
   try {
     const res = await fetch(`${PRED_API}/predictions?${p}`, { cache: "no-store" });
     if (!res.ok) return { reachable: false, count: 0, items: [] };

@@ -637,6 +637,43 @@ class TickerAnalysis(Base):
     error: Mapped[str | None] = mapped_column(sa.Text)
 
 
+class PredictionContext(Base):
+    """Companion origin-news context for a prediction (the LEDGER lane feature).
+
+    ``predictions`` is append-only after issue except the grader fields (I4), so a
+    prediction's originating-news provenance — source_class (the STRUCTURED vs SOCIAL
+    lane), headline, url, source — is carried HERE, keyed by prediction_id, instead
+    of on the immutable ledger row. Freely mutable/backfillable: this is a derived
+    convenience table, NOT a ledger row.
+
+    Written at arm time from the live cluster/raw_items join (see
+    pipeline.common.prediction_context) and backfilled for history from the full
+    local DB during seed export. ``cluster_id`` is a SOFT pointer (not an FK): the
+    cluster family is deliberately NOT shipped in the slim seed, so an FK would
+    dangle on the hydrated Railway volume.
+    """
+
+    __tablename__ = "prediction_context"
+    __table_args__ = (
+        sa.CheckConstraint(
+            "source_class IS NULL OR source_class IN ('structured', 'social', 'mixed')",
+            name="ck_prediction_context_source_class",
+        ),
+    )
+
+    prediction_id: Mapped[str] = mapped_column(
+        sa.ForeignKey("predictions.prediction_id"), primary_key=True
+    )
+    # The lane the LEDGER splits on. null when the originating cluster could not be
+    # resolved (kept honest — never guessed). 'mixed' if contributing origins disagree.
+    source_class: Mapped[str | None] = mapped_column(sa.String(12), index=True)
+    headline: Mapped[str | None] = mapped_column(sa.Text)
+    url: Mapped[str | None] = mapped_column(sa.Text)
+    source: Mapped[str | None] = mapped_column(sa.String(200))
+    cluster_id: Mapped[str | None] = mapped_column(sa.String(64))  # resolved origin (soft ref)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+
 # --- I2: raw_items append-only ------------------------------------------------
 
 
