@@ -121,7 +121,10 @@ def live_news(
     conds = []
     if source_type == "social":
         conds.append(RawItem.source_class == "social")
-    elif fine:
+    elif source_type == "structured" or fine:
+        # 'structured' is the whole structured lane (rss+sec+fda) — what the frontend's
+        # structured filter sends. The fine tags (sec/fda/rss) narrow WITHIN the lane via
+        # the Python post-filter below; 'structured' keeps the whole lane (no post-filter).
         conds.append(RawItem.source_class == "structured")
     if ticker:
         conds.append(

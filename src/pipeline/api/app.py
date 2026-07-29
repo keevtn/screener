@@ -1203,8 +1203,16 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
         the external Mongo middleware the frontend used to call. Newest-first, cluster-
         attributed (tickers + sentiment), in the frontend's NewsItem shape. ``source_type``
         is the coarse tape tag (rss|sec|fda|social); ``ticker`` narrows to one symbol."""
-        if source_type is not None and source_type not in ("rss", "sec", "fda", "social"):
-            raise HTTPException(status_code=422, detail="source_type must be rss|sec|fda|social")
+        if source_type is not None and source_type not in (
+            "rss",
+            "sec",
+            "fda",
+            "social",
+            "structured",
+        ):
+            raise HTTPException(
+                status_code=422, detail="source_type must be rss|sec|fda|social|structured"
+            )
         from pipeline.aggregate.news import live_news
 
         return live_news(session, source_type=source_type, ticker=ticker, limit=limit)

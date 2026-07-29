@@ -30,7 +30,36 @@ class ImmutableRowViolation(RuntimeError):
     """Raised on illegal mutation of configs (I3) or predictions (I4)."""
 
 
-class UTCDateTime(sa.types.TypeDecorator):
+class _TolerantDateResult:
+    """Mixin: on READ, degrade a malformed / non-string stored value to None instead
+    of raising. SQLite's DATE/DATETIME result processor calls ``date.fromisoformat`` /
+    ``datetime.fromisoformat`` with only a ``value is not None`` guard — no
+    ``isinstance(str)`` check — so a row that somehow holds a non-string (int/float/
+    bytes) in a date column raises "fromisoformat: argument must be str" and 500s the
+    whole endpoint (observed on the Railway deploy: /screener/rows, /universe/screen).
+    A read-only API must not fail an entire page over one corrupt row: the bad value
+    comes back None and the rest of the row still renders.
+
+    Overriding ``result_processor`` (rather than ``process_result_value``) is required
+    because the impl's processor is what raises, and it runs BEFORE process_result_value.
+    The write/bind path is untouched — only reads are made defensive.
+    """
+
+    def result_processor(self, dialect: Any, coltype: Any) -> Any:
+        inner = self.impl_instance.result_processor(dialect, coltype)
+
+        def process(value: Any) -> Any:
+            if inner is not None:
+                try:
+                    value = inner(value)
+                except (TypeError, ValueError):
+                    return None
+            return self.process_result_value(value, dialect)
+
+        return process
+
+
+class UTCDateTime(_TolerantDateResult, sa.types.TypeDecorator):
     """Aware-UTC datetime column: naive values are rejected, reads come back aware."""
 
     impl = sa.DateTime(timezone=True)
@@ -46,6 +75,17 @@ class UTCDateTime(sa.types.TypeDecorator):
     def process_result_value(self, value: datetime | None, dialect: Any) -> datetime | None:
         if value is not None and value.tzinfo is None:
             value = value.replace(tzinfo=UTC)
+        return value
+
+
+class SafeDate(_TolerantDateResult, sa.types.TypeDecorator):
+    """A plain date column with the same tolerant read as UTCDateTime (see
+    _TolerantDateResult). Storage and binding are identical to ``sa.Date``."""
+
+    impl = sa.Date
+    cache_ok = True
+
+    def process_result_value(self, value: Any, dialect: Any) -> Any:
         return value
 
 
@@ -101,7 +141,7 @@ class Entity(Base):
     active: Mapped[bool] = mapped_column(default=True)
     # New listings get a cold-start window (~30d): buzz z-scores suppressed and
     # social min-sample gates raised until it passes (task 5b.2; Phase 6 honors it).
-    cold_start_until: Mapped[date_ | None] = mapped_column(sa.Date)
+    cold_start_until: Mapped[date_ | None] = mapped_column(SafeDate)
 
 
 class Config(Base):
@@ -141,7 +181,7 @@ class Prediction(Base):
     outcome: Mapped[str | None] = mapped_column(sa.String(10))
     realized_adjusted_return: Mapped[float | None] = mapped_column(sa.Float)
     graded_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
-    resolving_close: Mapped[date_ | None] = mapped_column(sa.Date)  # crossing close (lead time)
+    resolving_close: Mapped[date_ | None] = mapped_column(SafeDate)  # crossing close (lead time)
 
 
 class FundamentalsSnapshot(Base):
@@ -153,7 +193,7 @@ class FundamentalsSnapshot(Base):
     ticker: Mapped[str] = mapped_column(sa.String(12), primary_key=True)
     # Indexed: every /universe/* query does MAX(as_of) then WHERE as_of==latest;
     # as_of is not the leading PK column so the composite PK can't serve it.
-    as_of: Mapped[date_] = mapped_column(sa.Date, primary_key=True, index=True)
+    as_of: Mapped[date_] = mapped_column(SafeDate, primary_key=True, index=True)
     provider: Mapped[str] = mapped_column(sa.String(32))  # provenance stamp
     market_cap: Mapped[float | None] = mapped_column(sa.Float)
     shares_float: Mapped[float | None] = mapped_column(sa.Float)
@@ -187,7 +227,7 @@ class UniverseSnapshot(Base):
     snapshot_id: Mapped[str] = mapped_column(
         sa.String(32), primary_key=True, default=lambda: uuid4().hex
     )
-    snapshot_date: Mapped[date_] = mapped_column(sa.Date, index=True)
+    snapshot_date: Mapped[date_] = mapped_column(SafeDate, index=True)
     provider: Mapped[str] = mapped_column(sa.String(32))  # provenance stamp
     status: Mapped[str] = mapped_column(sa.String(16))
     members_json: Mapped[list[str]] = mapped_column(sa.JSON, default=list)
@@ -342,7 +382,7 @@ class SignalObservation(Base):
     cluster_id: Mapped[str] = mapped_column(sa.ForeignKey("clusters.cluster_id"), index=True)
     ticker: Mapped[str] = mapped_column(sa.String(12), index=True)
     t0: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
-    entry_price_date: Mapped[date_ | None] = mapped_column(sa.Date)  # first close after t0
+    entry_price_date: Mapped[date_ | None] = mapped_column(SafeDate)  # first close after t0
     features_json: Mapped[dict[str, Any]] = mapped_column(sa.JSON, default=dict)
     marks_json: Mapped[dict[str, Any]] = mapped_column(sa.JSON, default=dict)  # CAR at +1..+10d
     clean_window: Mapped[bool | None] = mapped_column()  # finalized at maturity (5c.3)
@@ -372,7 +412,7 @@ class ScheduledEvent(Base):
     id: Mapped[str] = mapped_column(sa.String(32), primary_key=True, default=lambda: uuid4().hex)
     ticker: Mapped[str] = mapped_column(sa.String(12), index=True)
     catalyst_type: Mapped[str] = mapped_column(sa.String(32), index=True)
-    event_date: Mapped[date_] = mapped_column(sa.Date, index=True)
+    event_date: Mapped[date_] = mapped_column(SafeDate, index=True)
     stage: Mapped[str | None] = mapped_column(sa.String(16))
     source: Mapped[str] = mapped_column(sa.String(32))  # provider/provenance
     status: Mapped[str] = mapped_column(sa.String(12), default="upcoming", index=True)
@@ -502,7 +542,7 @@ class AttentionDaily(Base):
     __tablename__ = "attention_daily"
 
     ticker: Mapped[str] = mapped_column(sa.String(12), primary_key=True)
-    date: Mapped[date_] = mapped_column(sa.Date, primary_key=True)
+    date: Mapped[date_] = mapped_column(SafeDate, primary_key=True)
     struct_count: Mapped[int] = mapped_column(sa.Integer, default=0)
     social_count: Mapped[int] = mapped_column(sa.Integer, default=0)
     sentiment_mean: Mapped[float | None] = mapped_column(sa.Float)  # mean finbert, that day
@@ -545,7 +585,7 @@ class SearchInterestDaily(Base):
     __tablename__ = "search_interest_daily"
 
     ticker: Mapped[str] = mapped_column(sa.String(12), primary_key=True)
-    date: Mapped[date_] = mapped_column(sa.Date, primary_key=True)
+    date: Mapped[date_] = mapped_column(SafeDate, primary_key=True)
     interest: Mapped[float] = mapped_column(sa.Float)  # Google own-term relative 0-100
     term: Mapped[str] = mapped_column(sa.String(80))  # the query term, e.g. "AAPL stock"
     source: Mapped[str] = mapped_column(sa.String(24), default="google_trends")
@@ -762,7 +802,7 @@ class SimDailySummary(Base):
 
     __tablename__ = "sim_daily_summary"
 
-    session_date: Mapped[date_] = mapped_column(sa.Date, primary_key=True)
+    session_date: Mapped[date_] = mapped_column(SafeDate, primary_key=True)
     config_id: Mapped[str] = mapped_column(sa.String(32), primary_key=True)
     config_name: Mapped[str] = mapped_column(sa.String(64))
     trades: Mapped[int] = mapped_column(sa.Integer, default=0)  # closed (realized) this day
@@ -790,7 +830,7 @@ class PremarketPanel(Base):
 
     __tablename__ = "premarket_panels"
 
-    session_date: Mapped[date_] = mapped_column(sa.Date, primary_key=True)
+    session_date: Mapped[date_] = mapped_column(SafeDate, primary_key=True)
     computed_at: Mapped[datetime] = mapped_column(UTCDateTime)
     window_start: Mapped[datetime] = mapped_column(UTCDateTime)
     window_end: Mapped[datetime] = mapped_column(UTCDateTime)
@@ -824,7 +864,7 @@ class ExtendedSessionDaily(Base):
     )
 
     ticker: Mapped[str] = mapped_column(sa.String(12), primary_key=True)
-    session_date: Mapped[date_] = mapped_column(sa.Date, primary_key=True)
+    session_date: Mapped[date_] = mapped_column(SafeDate, primary_key=True)
     prior_close: Mapped[float | None] = mapped_column(sa.Float)  # prior trading day's close
     # Premarket (extended, best-effort): last print + move vs prior close.
     pm_last: Mapped[float | None] = mapped_column(sa.Float)
