@@ -1,0 +1,34 @@
+# Railway APP-service runtime deps (mirrors pyproject.toml [project.dependencies]).
+#
+# Nixpacks installs from THIS file (deterministic pip install) rather than gambling
+# on its pyproject/PEP-621 handling. Because requirements.txt is used, nixpacks does
+# NOT `pip install .`, so the `pipeline` package (src/ layout) is put on sys.path by
+# scripts/railway_start.sh via PYTHONPATH instead of being installed.
+#
+# LEXICON-ONLY on Railway: torch/transformers/FinBERT are intentionally excluded so
+# the image stays small (the pipeline runs with --no-finbert). Do NOT add them here.
+pydantic>=2
+sqlalchemy>=2.0
+httpx
+pandas
+numpy
+yfinance
+pyarrow
+python-dotenv
+apscheduler
+feedparser
+pyyaml
+rapidfuzz
+fastapi
+uvicorn
+anthropic
+# Ingestion runtime (backend/ RSS/EDGAR extractors the ingest loop dispatches into).
+aiohttp
+python-dateutil
+certifi
+# Quantized-FinBERT scoring backend (enabled — SENTIMENT_MODE=onnx). Both are
+# imported lazily, so if SENTIMENT_MODE is left at lexicon they cost image size only,
+# not RSS. The int8 model itself is fetched to the volume at boot (scripts/fetch_model.py),
+# NOT installed here. Comment these two out to revert to a strictly lexicon-only image.
+onnxruntime
+tokenizers

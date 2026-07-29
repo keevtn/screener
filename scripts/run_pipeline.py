@@ -61,7 +61,7 @@ from pipeline.lab.observe import observe_scored_clusters  # noqa: E402
 from pipeline.marketdata import MarketDataProvider  # noqa: E402
 from pipeline.panel import roll_event_status  # noqa: E402
 from pipeline.score.score import score_clusters  # noqa: E402
-from pipeline.score.sentiment import default_finbert, default_lm  # noqa: E402
+from pipeline.score.sentiment import default_lm, resolve_finbert  # noqa: E402
 from pipeline.signal.cycle import run_signal_cycle  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -383,7 +383,11 @@ def main() -> None:
         help="re-score EVERY cluster this run (required after editing "
         "configs/catalysts.yaml or scoring config; normal sweeps score only new clusters)",
     )
-    parser.add_argument("--no-finbert", action="store_true", help="LM-only scoring (low RAM)")
+    parser.add_argument(
+        "--no-finbert",
+        action="store_true",
+        help="hard override: LM-only scoring regardless of $SENTIMENT_MODE (low RAM)",
+    )
     parser.add_argument(
         "--no-market", action="store_true", help="skip grade/mark/baselines (no yfinance)"
     )
@@ -405,7 +409,9 @@ def main() -> None:
     tiers = load_source_tiers()
     provider = None if args.no_market else MarketDataProvider()
     lm = default_lm()
-    finbert = None if args.no_finbert else default_finbert()
+    # $SENTIMENT_MODE selects the FinBERT backend (lexicon | onnx | torch) with
+    # automatic lexicon fallback; --no-finbert is a hard LM-only override.
+    finbert = None if args.no_finbert else resolve_finbert()
 
     with Session(engine) as s:
         entities = s.execute(select(Entity)).scalars().all()

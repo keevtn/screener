@@ -113,8 +113,18 @@ frontend is a standalone Next.js service.
    on the volume). Add any optional keys from
    [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) (`ANTHROPIC_API_KEY`, `ALPACA_*`, …).
    `PORT`/`HOST` are injected automatically.
-5. Deploy. On boot the start script runs `init_db` → seeds entities/universe in the
-   background → starts the pipeline loop, and serves the API in the foreground.
+5. Deploy. On boot the start script runs `init_db`, **hydrates the demo history**
+   from the committed seed if the volume is empty
+   ([`scripts/hydrate_seed.py`](scripts/hydrate_seed.py)), then in the background
+   fetches the FinBERT model (only if onnx is on), seeds entities/universe, and
+   starts the pipeline loop — serving the API in the foreground the whole time.
+
+> **Demo history is seeded automatically.** A fresh volume starts empty, so
+> `seed/pipeline_seed.db` (a slim ~28 MB extract — prediction ledger, graded
+> outcomes, attention history, universe, paper-trading report cards; the bulk news
+> archive is excluded and re-accumulates live) is copied in on first boot. It is
+> idempotent: once the ledger has rows, restarts skip it. Refresh it before a push
+> with `python scripts/export_seed.py --source path/to/pipeline.db`.
 
 **2 — Frontend service (Next.js)**
 1. In the same project → **New → GitHub repo** (same repo) → a second service.
@@ -128,6 +138,53 @@ frontend is a standalone Next.js service.
 > Single instance by design: SSE fan-out runs in-process (no Redis needed) and the
 > pipeline is one background worker. The API stays up if the worker hiccups; Railway
 > restarts the container only if the foreground API exits.
+
+### Optional: quantized FinBERT sentiment (ONNX)
+
+By default the pipeline scores sentiment with the zero-dependency Loughran–McDonald
+lexicon (`SENTIMENT_MODE=lexicon`). For higher-accuracy, finance-tuned sentiment you
+can switch on an **int8-quantized ProsusAI/finbert** that runs **in-process on Railway
+via ONNX Runtime** — the image ships only `onnxruntime` + `tokenizers` (no
+torch/transformers), and peak RSS for the scorer is ~220 MB (the int8 graph is
+~105 MB). **There is no external inference API** — GitHub/HuggingFace are used *only*
+as static file hosting for the model, which is downloaded to the volume once at boot
+([`scripts/fetch_model.py`](scripts/fetch_model.py), checksum-verified and cached).
+
+**a. Export + quantize locally** (needs the ML stack, which is deliberately *not* in
+`requirements.txt`):
+
+```bash
+pip install "optimum[onnxruntime]>=1.20" "transformers>=4.35" torch \
+  --extra-index-url https://download.pytorch.org/whl/cpu
+python scripts/export_finbert_onnx.py     # prints the int8 size + SHA256
+```
+
+This writes `build/finbert-onnx/model.int8.onnx` (gitignored — too big to commit) and
+the tokenizer into `models/finbert/` (small; **commit `tokenizer.json` + `vocab.txt`** —
+the runtime reads them).
+
+**b. Host the ~105 MB `model.int8.onnx`** — pick one; both are just static downloads:
+
+- **GitHub Release asset** (recommended — same repo, no extra account). After you push,
+  create a Release (e.g. tag `finbert-onnx-v1`) and upload `model.int8.onnx` as an
+  asset (Releases accept files up to 2 GB). The download URL is then:
+  `https://github.com/<owner>/<repo>/releases/download/finbert-onnx-v1/model.int8.onnx`
+- **HuggingFace Hub** — upload the file to a model repo you own; the resolve URL is:
+  `https://huggingface.co/<user>/<repo>/resolve/main/model.int8.onnx`
+
+**c. Turn it on** — uncomment `onnxruntime` + `tokenizers` in `requirements.txt` (already
+uncommented if you followed the enable step) and set these app-service Variables:
+
+```
+SENTIMENT_MODE=onnx
+FINBERT_ONNX_URL=<the download URL from step b>
+FINBERT_ONNX_SHA256=<the hash printed in step a>
+FINBERT_ONNX_PATH=/data/models/finbert-int8.onnx   # on the volume, so it caches across restarts
+```
+
+If the model or its deps are ever missing, scoring **automatically falls back to the
+lexicon** rather than failing — so a bad URL degrades gracefully instead of breaking
+the deploy.
 
 ## Testing
 

@@ -37,6 +37,13 @@ next-env.d.ts
 data/
 *.sqlite3
 *.db
+# ...but DO ship the slim demo-history seed (28 MB, < GitHub's 100 MB limit).
+# It hydrates a fresh Railway volume at boot (scripts/hydrate_seed.py).
+!seed/pipeline_seed.db
+
+# ONNX model artifacts are fetched to the volume at boot (scripts/fetch_model.py),
+# never committed — the int8 FinBERT is ~110 MB (> GitHub's 100 MB limit).
+*.onnx
 
 # Coverage
 .coverage

@@ -1,0 +1,4 @@
+# This repo is authored on Windows. Force LF for shell scripts so a CRLF shebang
+# (\r after `#!/usr/bin/env bash`) never breaks bash when Railway/Linux runs them.
+# Applies on checkout regardless of a machine's core.autocrlf setting.
+*.sh text eol=lf
