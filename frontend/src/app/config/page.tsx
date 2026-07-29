@@ -241,7 +241,7 @@ export default function ConfigPage() {
           ))}
         </aside>
 
-        <section className="flex-1 overflow-y-auto">
+        <section className="flex-1 overflow-y-auto" tabIndex={0} aria-label="Configuration detail">
           {proposal ? (
             <ProposalDetail
               proposal={proposal}

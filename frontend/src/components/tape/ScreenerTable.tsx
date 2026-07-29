@@ -348,7 +348,13 @@ export default function ScreenerTable({
 
         {/* ── Horizontally-scrolling column groups ── */}
         <div style={{ minWidth: 0, position: "relative" }}>
-          <div className="tape-xscroll" style={{ overflowX: "auto" }}>
+          <div
+            className="tape-xscroll"
+            style={{ overflowX: "auto" }}
+            role="region"
+            aria-label="Screener table, scroll horizontally for more columns"
+            tabIndex={0}
+          >
           <div style={{ minWidth: 1520, paddingLeft: 16 }}>
             {/* header: group labels + leaf column names, together HEADER_H tall */}
             <div style={{ height: HEADER_H, borderBottom: `1px solid ${C.border}`, display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>

@@ -26,8 +26,11 @@ const config: Config = {
           text:      "#E6EAF2",
           sub:       "#B9C0CF",
           muted:     "#8B94A7",
-          faint:     "#5A6478",
-          dim:       "#3E4656",
+          // faint/dim raised to clear WCAG 1.4.3 (4.5:1) for small terminal text
+          // on the lightest surface (#0D1017): faint 3.2->5.5:1, dim 2.0->4.7:1.
+          // Order muted > faint > dim preserved so the de-emphasis hierarchy holds.
+          faint:     "#7E8A9E",
+          dim:       "#757F91",
           accent:    "#4FD1C5",
           "accent-hi": "#8AE8DF",
           bull:      "#34D399",

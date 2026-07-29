@@ -160,6 +160,7 @@ function Sel({
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
+        aria-label={label}
         className="max-w-[8.5rem] bg-tape-panel border border-tape-border rounded px-1 py-0.5 text-tape-text text-[10.5px] outline-none focus:border-tape-accent"
       >
         <option value="">any</option>

@@ -1,0 +1,16 @@
+{
+  "baseUrl": "http://localhost:3000",
+  "tags": ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"],
+  "settleMs": 2200,
+  "viewport": { "width": 1440, "height": 900 },
+  "routes": [
+    "/",
+    "/screener",
+    "/universe",
+    "/catalysts",
+    "/rank",
+    "/ledger",
+    "/eval",
+    "/config"
+  ]
+}

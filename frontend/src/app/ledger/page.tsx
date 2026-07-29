@@ -14,18 +14,15 @@ import { PIPE_EVENTS, subscribeEvents } from "@/lib/events";
  * Every issued prediction, with the grader-filled outcome fields. Read-only, all
  * real from /predictions (:8001). status/outcome/return are exactly what the
  * grader wrote — nothing synthesized. Each row also carries its originating-news
- * context (the STRUCTURED vs SOCIAL lane + the article headline/link) from the
- * companion prediction_context table, served on the same endpoint (no N+1).
+ * headline + link from the companion prediction_context table, served on the same
+ * endpoint (no N+1). (Predictions are structured-origin only by invariant I8, so
+ * there is no source-class split to show — the origin is just the article.)
  */
 
 const STATUSES = ["all", "open", "graded"] as const;
 type StatusFilter = (typeof STATUSES)[number];
 
-const LANES = ["all", "structured", "social"] as const;
-type LaneFilter = (typeof LANES)[number];
-
-// One fetch pulls the most-recent slice; lanes split client-side so switching is
-// instant and per-lane counts are visible. Rendering is paged to stay snappy.
+// One fetch pulls the most-recent slice; rendering is paged to stay snappy.
 const FETCH_LIMIT = 1000;
 const PAGE_SIZE = 50;
 
@@ -48,16 +45,9 @@ function isHttp(url: string | null): url is string {
   return !!url && (url.startsWith("http://") || url.startsWith("https://"));
 }
 
-function laneOf(p: LedgerPrediction): LaneFilter | "unknown" {
-  if (p.source_class === "structured") return "structured";
-  if (p.source_class === "social") return "social";
-  return "unknown"; // mixed/null — only ever shown under the ALL lane
-}
-
 export default function LedgerPage() {
   const clock = useClock();
   const [status, setStatus] = useState<StatusFilter>("all");
-  const [lane, setLane] = useState<LaneFilter>("all");
   const [page, setPage] = useState(0);
   const [items, setItems] = useState<LedgerPrediction[]>([]);
   const [reachable, setReachable] = useState(true);
@@ -78,13 +68,11 @@ export default function LedgerPage() {
   // Reset to the first page whenever the visible set changes.
   useEffect(() => {
     setPage(0);
-  }, [status, lane]);
+  }, [status]);
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
-      // Lane is applied client-side (below) so the fetched window carries every
-      // lane at once — instant switching + honest per-lane counts.
       const r = await fetchLedger({
         status: status === "all" ? undefined : status,
         limit: FETCH_LIMIT,
@@ -103,38 +91,23 @@ export default function LedgerPage() {
     };
   }, [status, pushTick]);
 
-  const laneCounts = useMemo(() => {
-    const c = { all: items.length, structured: 0, social: 0 };
-    for (const p of items) {
-      const l = laneOf(p);
-      if (l === "structured") c.structured += 1;
-      else if (l === "social") c.social += 1;
-    }
-    return c;
-  }, [items]);
-
-  const laneItems = useMemo(() => {
-    if (lane === "all") return items;
-    return items.filter((p) => laneOf(p) === lane);
-  }, [items, lane]);
-
   const stats = useMemo(() => {
-    const graded = laneItems.filter((p) => p.status === "graded");
+    const graded = items.filter((p) => p.status === "graded");
     const resolved = graded.filter((p) => p.outcome === "correct" || p.outcome === "incorrect");
     const correct = graded.filter((p) => p.outcome === "correct").length;
     return {
-      total: laneItems.length,
-      open: laneItems.filter((p) => p.status === "open").length,
+      total: items.length,
+      open: items.filter((p) => p.status === "open").length,
       graded: graded.length,
       hitRate: resolved.length ? correct / resolved.length : null,
     };
-  }, [laneItems]);
+  }, [items]);
 
-  const pageCount = Math.max(1, Math.ceil(laneItems.length / PAGE_SIZE));
+  const pageCount = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
   const clampedPage = Math.min(page, pageCount - 1);
   const pageItems = useMemo(
-    () => laneItems.slice(clampedPage * PAGE_SIZE, clampedPage * PAGE_SIZE + PAGE_SIZE),
-    [laneItems, clampedPage],
+    () => items.slice(clampedPage * PAGE_SIZE, clampedPage * PAGE_SIZE + PAGE_SIZE),
+    [items, clampedPage],
   );
 
   return (
@@ -143,11 +116,12 @@ export default function LedgerPage() {
 
       <div className="shrink-0 flex flex-wrap items-center gap-x-5 gap-y-2 px-[22px] py-3 border-b border-tape-border bg-tape-panel-2 tape-mono text-[11px]">
         <span className="text-tape-muted tracking-[0.12em] font-semibold">LEDGER</span>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1" role="group" aria-label="Filter by status">
           {STATUSES.map((s) => (
             <button
               key={s}
               onClick={() => setStatus(s)}
+              aria-pressed={status === s}
               className={`px-2.5 py-1 rounded tracking-[0.08em] uppercase ${
                 status === s
                   ? "bg-tape-panel text-tape-accent border border-tape-border"
@@ -155,28 +129,6 @@ export default function LedgerPage() {
               }`}
             >
               {s}
-            </button>
-          ))}
-        </div>
-        <span className="text-tape-border-soft">·</span>
-        <div className="flex items-center gap-1">
-          {LANES.map((l) => (
-            <button
-              key={l}
-              onClick={() => setLane(l)}
-              className={`px-2.5 py-1 rounded tracking-[0.08em] uppercase flex items-center gap-1.5 ${
-                lane === l
-                  ? "bg-tape-panel text-tape-accent border border-tape-border"
-                  : "text-tape-faint hover:text-tape-sub border border-transparent"
-              }`}
-              title={
-                l === "social"
-                  ? "predictions whose originating news is social (I8: the signal engine is structured-only, so this lane is typically empty)"
-                  : undefined
-              }
-            >
-              {l}
-              <span className="text-tape-dim">{laneCounts[l]}</span>
             </button>
           ))}
         </div>
@@ -207,26 +159,24 @@ export default function LedgerPage() {
         <div className="flex-1 flex items-center justify-center tape-mono text-[11px] text-tape-muted px-8 text-center">
           Prediction API not reachable on :8001 — start it with scripts/serve_api.py.
         </div>
-      ) : laneItems.length === 0 ? (
+      ) : items.length === 0 ? (
         <div className="flex-1 flex items-center justify-center tape-mono text-[11px] text-tape-muted px-8 text-center">
-          {lane === "social"
-            ? "No social-origin predictions — the signal engine is structured-only (I8), so this lane is empty."
-            : "No predictions in the ledger for this filter."}
+          No predictions in the ledger for this filter.
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto">
           <table className="w-full border-collapse tape-mono text-[11px]">
             <thead>
               <tr className="sticky top-0 bg-tape-panel-2 text-tape-muted text-left tracking-[0.1em] border-b border-tape-border z-10">
-                <th className="px-4 py-2 font-semibold w-20">TICKER</th>
-                <th className="px-2 py-2 font-semibold w-20">DIR</th>
-                <th className="px-2 py-2 font-semibold w-16">CONF</th>
-                <th className="px-2 py-2 font-semibold w-14">HZN</th>
-                <th className="px-3 py-2 font-semibold w-36">ISSUED</th>
-                <th className="px-3 py-2 font-semibold">ORIGIN NEWS</th>
-                <th className="px-2 py-2 font-semibold w-20">STATUS</th>
-                <th className="px-2 py-2 font-semibold w-24">OUTCOME</th>
-                <th className="px-2 py-2 font-semibold w-24">ADJ RET</th>
+                <th scope="col" className="px-4 py-2 font-semibold w-20">TICKER</th>
+                <th scope="col" className="px-2 py-2 font-semibold w-20">DIR</th>
+                <th scope="col" className="px-2 py-2 font-semibold w-16">CONF</th>
+                <th scope="col" className="px-2 py-2 font-semibold w-14">HZN</th>
+                <th scope="col" className="px-3 py-2 font-semibold w-36">ISSUED</th>
+                <th scope="col" className="px-3 py-2 font-semibold">ORIGIN NEWS</th>
+                <th scope="col" className="px-2 py-2 font-semibold w-20">STATUS</th>
+                <th scope="col" className="px-2 py-2 font-semibold w-24">OUTCOME</th>
+                <th scope="col" className="px-2 py-2 font-semibold w-24">ADJ RET</th>
               </tr>
             </thead>
             <tbody>
@@ -268,12 +218,11 @@ export default function LedgerPage() {
                       ) : (
                         <span className="text-tape-faint">—</span>
                       )}
-                      <span className="text-tape-dim text-[10px] flex gap-1.5">
-                        {p.source_class && (
-                          <span className="uppercase tracking-[0.08em]">{p.source_class}</span>
-                        )}
-                        {p.source && <span className="truncate max-w-[14rem]">· {p.source}</span>}
-                      </span>
+                      {p.source && (
+                        <span className="text-tape-dim text-[10px] truncate max-w-[16rem]">
+                          {p.source}
+                        </span>
+                      )}
                     </div>
                   </td>
                   <td className="px-2 py-2 text-tape-muted">{p.status}</td>
@@ -300,14 +249,14 @@ export default function LedgerPage() {
         </div>
       )}
 
-      {!loading && reachable && laneItems.length > 0 && (
+      {!loading && reachable && items.length > 0 && (
         <div className="shrink-0 flex items-center gap-4 px-[22px] py-2 border-t border-tape-border bg-tape-panel-2 tape-mono text-[11px] text-tape-faint">
           <span>
             showing{" "}
             <span className="text-tape-sub">
               {clampedPage * PAGE_SIZE + 1}–{clampedPage * PAGE_SIZE + pageItems.length}
             </span>{" "}
-            of <span className="text-tape-sub">{laneItems.length}</span>
+            of <span className="text-tape-sub">{items.length}</span>
             {items.length >= FETCH_LIMIT && (
               <span className="text-tape-dim"> (most-recent {FETCH_LIMIT})</span>
             )}
