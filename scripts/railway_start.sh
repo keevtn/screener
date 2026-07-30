@@ -1,91 +1,124 @@
 #!/usr/bin/env bash
-# Railway APP-service entrypoint (colocated worker + API over a shared SQLite volume).
+# Railway APP-service entrypoint — API-FIRST + supervised workers.
 #
-# One process group, one container:
-#   1. init_db          — create tables + append-only triggers (fast, BLOCKING: the
-#                          API cannot serve without the schema).
-#   2. hydrate_seed      — port the slim demo history (prediction ledger, graded
-#                          outcomes, attention, universe, report cards) onto a FRESH
-#                          volume, once (skips if the ledger is already non-empty).
-#                          Bounded local copy, so it runs before the port bind.
-#   3. (background)      — fetch_model (quantized FinBERT ONNX -> volume, only if
-#                          SENTIMENT_MODE=onnx), then one-time seed_entities +
-#                          snapshot_universe, then the live two-speed pipeline loop
-#                          (ingest -> enrich -> score -> signal). Scoring backend is
-#                          $SENTIMENT_MODE (lexicon default; onnx = int8 FinBERT).
-#   4. serve_api (exec)  — the foreground web process; binds 0.0.0.0:$PORT, which is
-#                          what Railway health-checks (GET /health).
+# Boot order (deliberate, after the 2026-07-30 incident where boot-blocking work
+# hung new containers so healthchecks flunked, cutovers never completed, and the
+# unsupervised pipeline/driver died silently for ~40 min):
 #
-# Seed/universe/model-fetch run behind the API so a slow SEC/Nasdaq/HF fetch never
-# delays the port bind (a fresh deploy serves the seeded history immediately and an
-# empty LIVE feed until the first sweep lands). All are idempotent, so re-running
-# them on every restart is safe. The pipeline is a child of this script — if it dies
-# the API stays up (degraded: no new news); Railway restarts the whole container
-# only if the foreground API exits.
+#   1. serve_api starts FIRST (supervised) and binds $PORT immediately, so the
+#      Railway healthcheck (GET /health) passes in seconds and cutovers complete
+#      reliably — no more drained-old-container limbo. On an existing volume the
+#      schema is already present; on a fresh one the API self-heals once bootstrap
+#      runs init_db (serve_api relaunches under its supervisor meanwhile).
+#   2. BOOTSTRAP runs AFTER the API is up: wait-for-DB-dir-writable (covers a volume
+#      that attaches late), then init_db, hydrate_seed(+self-heal), assign policies,
+#      model fetch, entities, universe — each with a HARD TIMEOUT, a loud [boot]
+#      line, and isolated failure (log + continue). Nothing here can hang boot.
+#   3. WORKERS (pipeline, and the driver if TRADER_DRIVER_ENABLED) launch AFTER
+#      bootstrap, SUPERVISED: if a worker exits it is relaunched with capped
+#      backoff and a loud [boot] line — a worker death is never silent again.
+#
+# Every stage prints an unmistakable [boot] line so a runtime log instantly shows
+# where boot is. Order placement stays ONLY in the driver's internal clock loop.
 set -uo pipefail
 
-# Run from the repo root so relative paths (scripts/, the data/ SQLite volume)
-# resolve the same regardless of the CWD Railway invokes us with.
 cd "$(dirname "$0")/.." || exit 1
 
-# Make the `pipeline` package (src/ layout) importable WITHOUT a build/editable
-# install: nixpacks installs deps from requirements.txt and does not `pip install .`,
-# and several entry scripts (init_db, serve_api, seed_entities, snapshot_universe)
-# do `from pipeline...` without touching sys.path themselves. Repo root is included
-# too so backend/ flat modules resolve for any script that needs them.
+# Make the `pipeline` package (src/ layout) importable without an editable install.
 export PYTHONPATH="$PWD/src:$PWD:${PYTHONPATH:-}"
-
 export HOST=0.0.0.0
-INTERVAL="${PIPELINE_INTERVAL:-300}"
-
-# Volume banner up front so a deploy-cutover ephemeral container (DB on the
-# overlay, not the mounted volume) is obvious in the logs from line one. This is
-# informational; the authoritative refusal lives in the TRADER driver, which will
-# not trade unless it can positively confirm the persistent volume.
-python -c "from pipeline.common.volume import volume_status as v; s=v(); print('[boot] VOLUME', 'OK' if s['confirmed'] else ('EPHEMERAL' if s['on_railway'] else 'local'), '-', s['reason'])" || echo "[boot] volume banner failed (continuing)"
-# Scoring backend: lexicon (default, zero extra weight) | onnx (int8 FinBERT) |
-# torch. onnx additionally needs FINBERT_ONNX_URL set so fetch_model can pull it.
 export SENTIMENT_MODE="${SENTIMENT_MODE:-lexicon}"
+INTERVAL="${PIPELINE_INTERVAL:-300}"
+PORT="${PORT:-8001}"
 
-echo "[boot] init_db (schema + triggers)"
-python scripts/init_db.py
+log() { echo "[boot] $*"; }
 
-echo "[boot] hydrate_seed (port demo history if the ledger is empty)"
-python scripts/hydrate_seed.py || echo "[boot] hydrate_seed failed; continuing (empty history)"
+# Run a bootstrap step with a hard timeout, loud logging, isolated failure. A step
+# that hangs is killed at the timeout and boot continues — it can never wedge boot.
+run_step() {
+  local name="$1" secs="$2"; shift 2
+  log "START $name (timeout ${secs}s)"
+  if timeout "${secs}" "$@"; then
+    log "OK    $name"
+  else
+    log "FAIL  $name (rc=$? — continuing)"
+  fi
+}
 
-# Assign the vol_stop A/B exit policies to the trader configs (idempotent +
-# walk-forward safe: only sets a config with no policy and no trades yet). Runs
-# regardless of TRADER_DRIVER_ENABLED — it only edits config rows, never trades.
-echo "[boot] assign_exit_policies (vol_stop A/B; idempotent)"
-python scripts/assign_exit_policies.py || echo "[boot] assign_exit_policies failed; continuing (configs keep horizon_hold)"
+# Supervise a long-running worker: (re)launch forever, relaunch on ANY exit with
+# capped exponential backoff and a loud line. Runs as a detached subshell.
+supervise() {
+  local name="$1"; shift
+  (
+    local delay=5
+    while true; do
+      log "WORKER start: ${name}"
+      "$@"
+      local rc=$?
+      log "WORKER ${name} EXITED rc=${rc} — relaunching in ${delay}s"
+      sleep "${delay}"
+      delay=$(( delay * 2 )); [ "${delay}" -gt 60 ] && delay=60
+    done
+  ) &
+}
 
-(
-  echo "[boot] fetch_model (quantized FinBERT ONNX; no-op unless SENTIMENT_MODE=onnx)"
-  python scripts/fetch_model.py || echo "[boot] fetch_model failed; continuing (lexicon fallback)"
-  echo "[boot] seed_entities (SEC CIK<->ticker upsert)"
-  python scripts/seed_entities.py || echo "[boot] seed_entities failed; continuing"
-  echo "[boot] snapshot_universe (Finviz -> Nasdaq fallback)"
-  python scripts/snapshot_universe.py || echo "[boot] snapshot_universe failed; continuing"
-  echo "[boot] pipeline loop (interval=${INTERVAL}s, SENTIMENT_MODE=${SENTIMENT_MODE})"
-  python scripts/run_pipeline.py --interval "${INTERVAL}"
-) &
+# --- 1. API FIRST -----------------------------------------------------------
+log "=== API-FIRST BOOT (port ${PORT}) ==="
+supervise "api" python scripts/serve_api.py
+log "api launching + supervised (healthcheck target GET /health)"
 
-# Standing paper-trading driver (optional, gated by TRADER_DRIVER_ENABLED, default
-# OFF). Order placement lives ONLY in this process's internal clock loop — never in
-# the API. It runs as its own child so a driver crash never touches the API/pipeline
-# (Railway restarts the whole container only if the FOREGROUND api exits). On boot
-# the driver reconciles Alpaca + the volume ledger so a mid-market redeploy never
-# double-enters or exceeds caps (see pipeline/sim/driver.py). run_trader.py itself
-# also no-ops unless the flag is truthy, so this is safe belt-and-suspenders.
+# --- 2. BOOTSTRAP (after the API is up) -------------------------------------
+bootstrap() {
+  log "=== BOOTSTRAP START ==="
+
+  # Wait for the DB directory to be writable (a volume can attach a beat late).
+  # Bounded to ~60s; on timeout we continue rather than hang the whole boot.
+  local dbdir
+  dbdir="$(python -c "from pipeline.common.db import database_url; from pipeline.common.volume import sqlite_dir; print(sqlite_dir(database_url()) or '')" 2>/dev/null || echo "")"
+  if [ -n "${dbdir}" ]; then
+    mkdir -p "${dbdir}" 2>/dev/null || true
+    local i=0
+    while ! { touch "${dbdir}/.boot_probe" 2>/dev/null && rm -f "${dbdir}/.boot_probe" 2>/dev/null; }; do
+      i=$(( i + 1 ))
+      [ "${i}" -eq 1 ] && log "waiting for DB dir ${dbdir} to be writable (volume attach)…"
+      if [ "${i}" -ge 60 ]; then
+        log "WARN DB dir ${dbdir} not writable after 60s — continuing"
+        break
+      fi
+      sleep 1
+    done
+    [ "${i}" -lt 60 ] && log "DB dir ${dbdir} writable"
+  fi
+
+  run_step "volume-banner"     20  python -c "from pipeline.common.volume import volume_status as v; s=v(); print('[boot] VOLUME', 'OK' if s['confirmed'] else ('EPHEMERAL' if s['on_railway'] else 'local'), '-', s['reason'])"
+  run_step "init_db"           60  python scripts/init_db.py
+  run_step "hydrate_seed"      300 python scripts/hydrate_seed.py
+  run_step "assign_policies"   60  python scripts/assign_exit_policies.py
+  run_step "fetch_model"       600 python scripts/fetch_model.py
+  run_step "seed_entities"     300 python scripts/seed_entities.py
+  run_step "snapshot_universe" 300 python scripts/snapshot_universe.py
+
+  log "=== BOOTSTRAP COMPLETE ==="
+}
+bootstrap
+
+# --- 3. WORKERS (supervised) ------------------------------------------------
+supervise "pipeline" python scripts/run_pipeline.py --interval "${INTERVAL}"
+log "pipeline supervised (interval=${INTERVAL}s, SENTIMENT_MODE=${SENTIMENT_MODE})"
+
 case "${TRADER_DRIVER_ENABLED:-}" in
   1 | true | TRUE | True | yes | on)
-    echo "[boot] TRADER driver ENABLED — launching standing daily loop"
-    (python scripts/run_trader.py || echo "[boot] trader driver exited") &
+    # Supervised: if the driver refuses (guard) or dies, it relaunches with
+    # backoff and retries — so a late-attaching volume auto-recovers into trading,
+    # and TRADER_VOLUME_GUARD=off / the guard/kill-switch semantics still apply.
+    supervise "driver" python scripts/run_trader.py
+    log "TRADER driver ENABLED — supervised"
     ;;
   *)
-    echo "[boot] TRADER driver disabled (TRADER_DRIVER_ENABLED unset/false)"
+    log "TRADER driver disabled (TRADER_DRIVER_ENABLED unset/false)"
     ;;
 esac
 
-echo "[boot] serve_api on 0.0.0.0:${PORT:-8001}"
-exec python scripts/serve_api.py
+# --- 4. keep the container alive on the supervisors (they never exit) --------
+log "=== BOOT DONE — supervising api + pipeline${TRADER_DRIVER_ENABLED:+ + driver} ==="
+wait
