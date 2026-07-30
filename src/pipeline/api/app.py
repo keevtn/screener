@@ -372,8 +372,10 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
     engine = engine or make_engine()
     ensure_indexes(engine)  # backfill perf indexes onto a long-lived DB (idempotent)
     from pipeline.api.watchlist import ensure_watchlist_table
+    from pipeline.sim.driver import ensure_heartbeat_table
 
     ensure_watchlist_table(engine)  # self-heal the Phase-3 watchlist table on boot
+    ensure_heartbeat_table(engine)  # self-heal the trader-driver heartbeat table
     app = FastAPI(title="Market News Prediction API", version="1", docs_url="/docs")
 
     # The Next.js dashboard (a different origin) posts to /agents/rank/run, so the
@@ -1145,6 +1147,16 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
                 "round_trips": [],
                 "report_cards": [],
             }
+
+    @app.get("/trader/driver")
+    def get_trader_driver(session: Session = Depends(get_session)) -> dict[str, Any]:
+        """Read-only liveness of the standing paper-trading driver, from its
+        heartbeat row. ``alive`` = a beat in the last ~3 min; ``conflict`` = two
+        drivers beating this same DB (only ONE may trade an account). This endpoint
+        cannot start/stop or trade — it just reports what the driver wrote."""
+        from pipeline.sim.driver import read_heartbeat
+
+        return {**read_heartbeat(session, now=utcnow(), stale_after_s=180.0)}
 
     @app.get("/trader/markers/{ticker}")
     def get_trader_markers(

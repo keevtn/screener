@@ -15,6 +15,7 @@ import {
   fetchBlotter,
   fetchCalendar,
   fetchDay,
+  fetchDriver,
   fetchPortfolioHistory,
   fetchPositions,
   fetchTraderAccount,
@@ -22,6 +23,7 @@ import {
   type BlotterScope,
   type CalendarResult,
   type DayResult,
+  type DriverStatus,
   type PortfolioHistory,
   type PositionsResult,
   type TraderAccount,
@@ -85,6 +87,7 @@ export default function TraderPage() {
   const [calendar, setCalendar] = useState<CalendarResult | null>(null);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [dayData, setDayData] = useState<DayResult | null>(null);
+  const [driver, setDriver] = useState<DriverStatus | null>(null);
 
   // Account + positions poll together (the live pulse of the page).
   useEffect(() => {
@@ -133,6 +136,21 @@ export default function TraderPage() {
       clearInterval(t);
     };
   }, [scope]);
+
+  // Driver liveness (read-only) for the footer — polled independently.
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      const d = await fetchDriver();
+      if (!cancelled) setDriver(d);
+    }
+    load();
+    const t = setInterval(load, 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, []);
 
   // Calendar loads for the displayed month while the History view is active.
   useEffect(() => {
@@ -373,6 +391,33 @@ export default function TraderPage() {
             )}
           </div>
         </>
+      )}
+
+      {driver?.conflict && (
+        <div
+          role="alert"
+          className="shrink-0 px-[22px] py-1.5 bg-[rgba(251,113,133,0.12)] border-t border-tape-bear tape-mono text-[11px] text-tape-bear font-semibold"
+        >
+          ⚠ DOUBLE-DRIVER: two trading drivers are writing this database — stop one immediately (only
+          one may trade a paper account).
+        </div>
+      )}
+      {driver && driver.present && !driver.conflict && (
+        <div className="shrink-0 flex items-center gap-2 px-[22px] py-1 border-t border-tape-border-soft bg-tape-rail tape-mono text-[10px]">
+          <span
+            className={`w-[6px] h-[6px] rounded-full ${driver.alive ? "bg-tape-bull tape-pulse" : "bg-tape-muted"}`}
+            aria-hidden
+          />
+          <span className={driver.alive ? "text-tape-bull" : "text-tape-muted"}>
+            trading driver {driver.alive ? "live" : "stale"}
+          </span>
+          <span className="text-tape-faint">
+            {driver.host ? `· ${driver.host}` : ""}
+            {driver.age_s != null ? ` · beat ${Math.round(driver.age_s)}s ago` : ""}
+            {driver.session_date ? ` · session ${driver.session_date}` : ""}
+            {driver.note ? ` · ${driver.note}` : ""}
+          </span>
+        </div>
       )}
 
       <HealthStrip

@@ -922,6 +922,35 @@ class ExtendedSessionDaily(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime)
 
 
+class TraderHeartbeat(Base):
+    """Liveness beacon for the standing paper-trading driver (Railway follow-up).
+
+    A single mutable row the driver upserts each sweep so the read-only web layer
+    can show whether the driver is alive and warn if TWO drivers beat into the
+    SAME database (a cheap double-driver signal). It carries NO trade authority —
+    order placement lives only in the driver's internal clock loop, never here.
+
+    Note the double-driver signal only catches drivers pointed at THIS database;
+    a second driver on a different DB (e.g. a local .db) can't be seen from here,
+    which is why the exactly-one-driver rule is enforced by docs, not code.
+    """
+
+    __tablename__ = "trader_heartbeat"
+
+    id: Mapped[str] = mapped_column(sa.String(16), primary_key=True, default="driver")
+    driver_id: Mapped[str] = mapped_column(sa.String(96))  # host:pid:started_epoch
+    host: Mapped[str | None] = mapped_column(sa.String(64))
+    pid: Mapped[int | None] = mapped_column(sa.Integer)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    last_beat: Mapped[datetime] = mapped_column(UTCDateTime)
+    sweeps: Mapped[int] = mapped_column(sa.Integer, default=0)
+    session_date: Mapped[str | None] = mapped_column(sa.String(10))  # ET date being traded
+    note: Mapped[str | None] = mapped_column(sa.String(32))  # sweep | flatten | idle
+    # Set when a beat arrives from a different driver_id whose last beat is still
+    # fresh — i.e. two drivers writing this same DB. Loud, but advisory.
+    conflict: Mapped[bool] = mapped_column(default=False)
+
+
 class WatchlistPin(Base):
     """A user-pinned ticker for the TRADER watchlist lane (Phase 3).
 

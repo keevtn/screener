@@ -58,5 +58,22 @@ python scripts/hydrate_seed.py || echo "[boot] hydrate_seed failed; continuing (
   python scripts/run_pipeline.py --interval "${INTERVAL}"
 ) &
 
+# Standing paper-trading driver (optional, gated by TRADER_DRIVER_ENABLED, default
+# OFF). Order placement lives ONLY in this process's internal clock loop — never in
+# the API. It runs as its own child so a driver crash never touches the API/pipeline
+# (Railway restarts the whole container only if the FOREGROUND api exits). On boot
+# the driver reconciles Alpaca + the volume ledger so a mid-market redeploy never
+# double-enters or exceeds caps (see pipeline/sim/driver.py). run_trader.py itself
+# also no-ops unless the flag is truthy, so this is safe belt-and-suspenders.
+case "${TRADER_DRIVER_ENABLED:-}" in
+  1 | true | TRUE | True | yes | on)
+    echo "[boot] TRADER driver ENABLED — launching standing daily loop"
+    (python scripts/run_trader.py || echo "[boot] trader driver exited") &
+    ;;
+  *)
+    echo "[boot] TRADER driver disabled (TRADER_DRIVER_ENABLED unset/false)"
+    ;;
+esac
+
 echo "[boot] serve_api on 0.0.0.0:${PORT:-8001}"
 exec python scripts/serve_api.py

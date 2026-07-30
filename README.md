@@ -146,6 +146,61 @@ frontend is a standalone Next.js service.
 > pipeline is one background worker. The API stays up if the worker hiccups; Railway
 > restarts the container only if the foreground API exits.
 
+### Optional: live paper trading on Railway (the standing driver)
+
+By default the app service only serves the API + runs the news pipeline — it does
+**not** trade. To let it place **paper** orders against Alpaca, set one flag on the
+**app service**:
+
+```
+TRADER_DRIVER_ENABLED=true          # master switch — default off = no trading
+ALPACA_API_KEY=<paper key id>       # PAPER account only (paper-api endpoint is hard-asserted)
+ALPACA_API_SECRET=<paper secret>
+# TRADER_DRIVER_SWEEP_S=60          # optional; seconds between entry/exit sweeps
+```
+
+With the flag on, [`scripts/railway_start.sh`](scripts/railway_start.sh) launches the
+standing driver ([`scripts/run_trader.py`](scripts/run_trader.py)) as its own child
+alongside the API: it arms one session per trading day off the **Alpaca clock**
+(the container runs UTC — all ET logic comes from the exchange clock, never host
+time), sweeps entries/exits, flattens ~10 min before the close, and writes
+`sim_trades` / `sim_daily_summary` to the volume DB so the TRADER blotter, calendar,
+and report cards populate end-to-end. It trades only configs you've enabled
+(`POST /sim/configs/{id}/toggle`); with none enabled it runs but places nothing.
+
+> **⚠ Exactly one driver may trade a paper account.** The driver acts on the real
+> Alpaca book. If Railway is trading this account, the **local** driver for the same
+> account MUST stay off, or the two will place duplicate/conflicting orders. The
+> TRADER tab footer shows a red DOUBLE-DRIVER banner if it detects two drivers
+> writing the same database (note: it can only see drivers on *this* DB — a local
+> driver on a separate `.db` is invisible, so this rule is on you).
+
+> **Disable trading instantly:** unset `TRADER_DRIVER_ENABLED` (or set it false) and
+> restart the service. The web layer stays read-only toward Alpaca regardless of the
+> flag — there is no HTTP route that can place, cancel, or modify an order.
+
+**Redeploy-mid-market safety.** A `git push` can rebuild the container while the
+market is open. On the next boot the driver reconciles the live Alpaca book (open
+positions, open orders, today's fills) against the volume ledger and resumes the
+day without double-entering or exceeding caps, because the durable state lives on
+the volume, not in memory:
+
+1. Push at 11:00 ET → Railway kills the container mid-session → a new one boots.
+2. `init_db` / `hydrate_seed` are idempotent (skip — the ledger is non-empty); the
+   driver process restarts and re-arms today's still-open session.
+3. It **does not re-enter** positions it already holds: entries dedupe against open
+   `sim_trades` + a 24 h re-entry cooldown (both read from the volume DB).
+4. It **respects caps already consumed today**: the per-config and portfolio loss
+   caps are recomputed each sweep from today's *closed* trades in the ledger — the
+   cap "state" is the immutable ledger itself, so it can't drift across a restart.
+5. It **resumes managing** open positions and still flattens at the cutoff; the EOD
+   flatten runs the engine force-exit **and** `broker.flatten_all()` as a backstop,
+   so no position outlives the session even if its DB row went missing.
+
+The only thing a restart resets is the broker's per-*run* order cap (a runaway-loop
+circuit breaker); real exposure stays bounded by the DB dedupe, the loss caps, and
+Alpaca's max-open cap.
+
 ### Optional: quantized FinBERT sentiment (ONNX)
 
 By default the pipeline scores sentiment with the zero-dependency Loughran–McDonald

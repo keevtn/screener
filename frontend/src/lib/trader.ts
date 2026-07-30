@@ -405,6 +405,26 @@ export function fetchMarkers(ticker: string): Promise<MarkersResult> {
   });
 }
 
+// --- standing driver liveness (read-only) -----------------------------------
+export interface DriverStatus {
+  reachable: boolean;
+  present: boolean;
+  alive: boolean;
+  age_s?: number;
+  host?: string | null;
+  driver_id?: string;
+  started_at?: string | null;
+  last_beat?: string | null;
+  sweeps?: number;
+  session_date?: string | null;
+  note?: string | null;
+  conflict?: boolean;
+}
+
+export function fetchDriver(): Promise<DriverStatus> {
+  return getJson<DriverStatus>("/trader/driver", { reachable: false, present: false, alive: false });
+}
+
 // --- live-chart overlay (exact intraday fill markers + intent) --------------
 export interface OverlayFillMarker {
   bar_time: number; // snapped 1-min bar start (UTC epoch) — where the marker draws

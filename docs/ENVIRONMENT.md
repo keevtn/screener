@@ -51,8 +51,10 @@ RANK / deep-dive panels.
 
 | Var | Default | Notes |
 |-----|---------|-------|
-| `ALPACA_API_KEY` / `ALPACA_API_SECRET` | — | Price bars + paper-trading sim + the read-only **TRADER** dashboard (`/trader/*`). **PAPER account keys only.** The web backend is strictly read-only toward Alpaca (account/positions/orders/portfolio-history/clock — no order placement/cancel); order placement stays with the local driver + human gate. Absent → sim/live quotes inert and the TRADER tab shows a "connect Alpaca keys" empty state; news + screener still work. Keys never reach the browser (all calls proxied by the API behind a ~10s cache). |
-| `SIM_ENABLED` | `false` | Arm the paper-trading simulation loop. |
+| `ALPACA_API_KEY` / `ALPACA_API_SECRET` | — | Price bars + paper-trading sim + the read-only **TRADER** dashboard (`/trader/*`) + the standing driver. **PAPER account keys only.** The web backend is strictly read-only toward Alpaca (account/positions/orders/portfolio-history/clock — no order placement/cancel); order placement happens ONLY in the standing driver's internal clock loop, never behind an HTTP route. Absent → sim/live quotes inert, the TRADER tab shows a "connect Alpaca keys" empty state, and the driver refuses to start; news + screener still work. Keys never reach the browser (all web calls proxied by the API behind a ~10s cache). |
+| `SIM_ENABLED` | `false` | Arm the in-pipeline paper-sim step (`run_pipeline`). Does NOT gate the standing driver (that's `TRADER_DRIVER_ENABLED`). |
+| `TRADER_DRIVER_ENABLED` | `false` | **Master switch for LIVE paper trading on Railway.** When true, the app service runs the standing daily driver (`scripts/run_trader.py`) alongside the API + pipeline: arm one session per trading day off the Alpaca clock, sweep entries/exits, flatten ~10 min before the close, write the EOD report card. Order placement lives only in this driver's clock loop. Default off = zero behavior change. **Disable trading instantly: unset this and restart the service.** ⚠ **Exactly one driver may trade a paper account** — if Railway trades, the local driver for this account MUST stay off (see README). |
+| `TRADER_DRIVER_SWEEP_S` | `60` | Seconds between driver sweeps (entry/exit evaluation). Min 5. |
 | `FINVIZ_AUTH_TOKEN` | — | Primary universe/fundamentals provider; absent → free Nasdaq directory fallback. |
 
 ## Ingestion identity + social — optional but polite
