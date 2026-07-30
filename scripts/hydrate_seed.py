@@ -79,6 +79,60 @@ def _download(url: str, dest: Path, sha256: str | None) -> None:
     tmp.replace(dest)
 
 
+_REPAIR_TABLE = "fundamentals_snapshots"
+# The corruption signature: a datetime-shaped string physically sitting in the
+# numeric `price` column. Healthy price is always REAL or NULL, so a TEXT value
+# starting YYYY-MM-DD can ONLY be a created_at timestamp shifted in by an old
+# positional `SELECT *` copy. GLOB (not LIKE) is case/locale-free and index-free.
+_SHIFT_SIGNATURE = (
+    "typeof(price) = 'text' AND price GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-*'"
+)
+
+
+def _repair_shifted_fundamentals(con: sqlite3.Connection) -> int:
+    """Self-heal the ONE known-corruptable snapshot table on boot.
+
+    ``fundamentals_snapshots`` is rebuildable snapshot data (not an append-only
+    ledger), so if the live volume shows the column-shift signature (a timestamp
+    string in the numeric ``price`` column), we wipe JUST that table's rows and let
+    the per-table emptiness gate re-copy it from the seed via the name-based path.
+    Returns the number of corrupt rows detected (0 = nothing repaired).
+
+    Guarded tightly: touches no other table; wipes only when the specific signature
+    is present AND the seed actually has rows to restore from — so it can never
+    trigger on healthy data or empty the table with nothing to refill it."""
+    live = con.execute(
+        "SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?", (_REPAIR_TABLE,)
+    ).fetchone()
+    seed = con.execute(
+        "SELECT 1 FROM seed.sqlite_master WHERE type='table' AND name=?", (_REPAIR_TABLE,)
+    ).fetchone()
+    if not live or not seed:
+        return 0
+    corrupt = con.execute(
+        f'SELECT COUNT(*) FROM main."{_REPAIR_TABLE}" WHERE {_SHIFT_SIGNATURE}'
+    ).fetchone()[0]
+    if corrupt == 0:
+        return 0
+    seed_rows = con.execute(f'SELECT COUNT(*) FROM seed."{_REPAIR_TABLE}"').fetchone()[0]
+    if seed_rows == 0:
+        print(
+            f"[hydrate] WARNING: {corrupt:,} shifted {_REPAIR_TABLE} rows detected but the "
+            "seed has none to restore from — leaving the table as-is (backend coercion "
+            "still neutralizes the bad values).",
+            file=sys.stderr,
+        )
+        return 0
+    total = con.execute(f'SELECT COUNT(*) FROM main."{_REPAIR_TABLE}"').fetchone()[0]
+    print(
+        f"[hydrate] REPAIR: detected {corrupt:,}/{total:,} {_REPAIR_TABLE} rows with a "
+        f"timestamp shifted into the numeric price column — wiping this table ONLY and "
+        f"re-copying {seed_rows:,} clean rows from the seed by column name."
+    )
+    con.execute(f'DELETE FROM main."{_REPAIR_TABLE}"')
+    return corrupt
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--url", default=os.environ.get("DATABASE_URL", "sqlite:///data/pipeline.db"))
@@ -128,6 +182,10 @@ def main() -> None:
         inserted: dict[str, int] = {}
         skipped: list[str] = []
         with con:
+            # Self-heal already-shifted fundamentals rows first: wiping the table
+            # here drops its row count to 0, so the emptiness gate below re-copies
+            # it (by column name) from the seed with correct values.
+            repaired = _repair_shifted_fundamentals(con)
             for t in seed_tables:
                 if t not in have:
                     skipped.append(t)  # live schema predates this seed table — skip safely
@@ -165,6 +223,12 @@ def main() -> None:
         )
         for t in sorted(filled, key=lambda k: -filled[k]):
             print(f"[hydrate]   {t:<28} +{filled[t]:,}")
+        if repaired:
+            restored = inserted.get(_REPAIR_TABLE, 0)
+            print(
+                f"[hydrate] REPAIR complete: replaced {repaired:,} shifted {_REPAIR_TABLE} "
+                f"rows with {restored:,} clean rows re-copied from the seed."
+            )
         if violations:
             print(f"[hydrate] WARNING: {len(violations)} foreign-key violations: {violations[:5]}",
                   file=sys.stderr)
