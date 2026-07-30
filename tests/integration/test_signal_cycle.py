@@ -117,6 +117,116 @@ def test_cycle_arm_then_context_writes_origin_news(engine):
         assert backfill_prediction_context(s) == 0
 
 
+def _add_pred(session, pid, cv, evidence, issued_at=T0, ticker="AAPL"):
+    session.add(
+        Prediction(
+            prediction_id=pid,
+            ticker=ticker,
+            direction="bullish",
+            confidence=0.7,
+            horizon_trading_days=3,
+            threshold=0.02,
+            issued_at=issued_at,
+            config_version=cv,
+            evidence_json=evidence,
+            status="open",
+        )
+    )
+
+
+def test_context_resolves_double_encoded_evidence(engine):
+    """A prediction whose evidence_json was double-encoded (stored as a JSON *string*,
+    not an object) must still resolve — the live 06:32 rows showed null context with
+    no error log, the signature of the dict-guard silently dropping a string. The
+    resolver coerces the string back to a dict."""
+    from pipeline.common.config import get_or_create_config
+
+    with Session(engine) as s:
+        cfg = get_or_create_config(s)
+        _seed(s, "good1", "AAPL", 0.8, 0.6)
+        # evidence_json is a Python str -> the JSON column stores it double-encoded,
+        # and reads it back as the string '{"cluster_ids": ["good1"]}'.
+        _add_pred(s, "p-str", cfg.config_version, '{"cluster_ids": ["good1"]}')
+        s.commit()
+
+        assert backfill_prediction_context(s) == 1
+        ctx = s.get(PredictionContext, "p-str")
+        assert ctx is not None and ctx.source_class == "structured"
+        assert ctx.headline == "good1"
+
+
+def test_context_sentinel_for_aged_unresolvable_only(engine):
+    """An AGED prediction whose origin can't resolve gets an all-null sentinel (so it
+    stops looping and shows an honest '—'); a FRESH one is left alone for retries."""
+    from datetime import UTC, datetime
+
+    from pipeline.common.config import get_or_create_config
+
+    with Session(engine) as s:
+        cfg = get_or_create_config(s)
+        _add_pred(s, "p-old", cfg.config_version, {"cluster_ids": ["gone"]}, issued_at=T0)
+        _add_pred(
+            s,
+            "p-new",
+            cfg.config_version,
+            {"cluster_ids": ["gone"]},
+            issued_at=datetime.now(UTC),  # too young to sentinel
+        )
+        s.commit()
+
+        backfill_prediction_context(s)
+        old = s.get(PredictionContext, "p-old")
+        assert old is not None and old.source_class is None  # sentinel written
+        assert old.cluster_id == "gone"  # what it tried, for traceability
+        assert s.get(PredictionContext, "p-new") is None  # fresh -> no row yet
+
+
+def test_context_repair_reresolves_null_row(engine):
+    """A null-field context row whose evidence now resolves is repaired in place —
+    the one-time recovery for rows stamped empty before their origin was joinable."""
+    from datetime import UTC, datetime
+
+    from pipeline.common.config import get_or_create_config
+    from pipeline.common.models import PredictionContext as PC
+    from pipeline.common.prediction_context import repair_null_context
+
+    with Session(engine) as s:
+        cfg = get_or_create_config(s)
+        _seed(s, "good1", "AAPL", 0.8, 0.6)  # now resolvable
+        _add_pred(s, "p-null", cfg.config_version, {"cluster_ids": ["good1"]})
+        # a pre-existing all-null (sentinel-shaped) row for it
+        s.add(PC(prediction_id="p-null", source_class=None, created_at=datetime.now(UTC)))
+        s.commit()
+
+        assert repair_null_context(s) == 1
+        row = s.get(PC, "p-null")
+        assert row.source_class == "structured" and row.headline == "good1"
+
+
+def test_context_debug_endpoint_shape(engine):
+    """The read-only debug helper exposes the stored evidence type, context-row state,
+    anti-join eligibility, and a dry-run resolve."""
+    from pipeline.common.config import get_or_create_config
+    from pipeline.common.prediction_context import resolve_debug
+
+    with Session(engine) as s:
+        cfg = get_or_create_config(s)
+        _seed(s, "good1", "AAPL", 0.8, 0.6)
+        _add_pred(s, "p-dbg", cfg.config_version, {"cluster_ids": ["good1"]})
+        s.commit()
+
+        d = resolve_debug(s, "p-dbg")
+        assert d["prediction_exists"] is True
+        assert d["evidence"]["python_type"] == "dict"
+        assert d["context_row_exists"] is False
+        assert d["anti_join_selects_as_missing"] is True
+        assert d["dry_run_resolve"]["extracted_cluster_ids"] == ["good1"]
+        assert d["dry_run_resolve"]["resolved_ctx"]["source_class"] == "structured"
+        assert d["dry_run_resolve"]["exception"] is None
+
+        assert resolve_debug(s, "nope")["prediction_exists"] is False
+
+
 def test_context_backfill_resilient_to_bad_evidence(engine):
     """A single prediction with malformed evidence_json (a non-dict) must NOT abort
     the whole backfill — otherwise one bad row silently starves every other new

@@ -533,6 +533,18 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
             ],
         )
 
+    @app.get("/predictions/{prediction_id}/context-debug")
+    def get_prediction_context_debug(
+        prediction_id: str, session: Session = Depends(get_session)
+    ) -> dict[str, Any]:
+        """Read-only diagnostic for why a prediction has (or lacks) origin-news context:
+        the stored evidence_json value + Python type, whether a prediction_context row
+        exists (and its raw fields / whether it's an all-null sentinel), anti-join
+        eligibility, and a dry-run of the resolver with any exception captured. No writes."""
+        from pipeline.common.prediction_context import resolve_debug
+
+        return resolve_debug(session, prediction_id)
+
     @app.get("/metrics", response_model=list[MetricsOut])
     def get_metrics(session: Session = Depends(get_session)) -> list[MetricsOut]:
         return [
@@ -679,6 +691,11 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
                         yield f"data: {json.dumps(event)}\n\n"
                     except TimeoutError:
                         yield ": ping\n\n"  # keepalive
+                    except StopAsyncIteration:
+                        # Underlying event stream ended — close the SSE gracefully.
+                        # Letting StopAsyncIteration escape an async generator becomes a
+                        # RuntimeError (PEP 479), which was spamming a traceback per cycle.
+                        break
             finally:
                 await agen.aclose()
 
