@@ -1090,6 +1090,68 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
             log.warning("trader blotter fetch failed", exc_info=True)
             return {"configured": True, "available": False, "scope": scope, "count": 0, "items": []}
 
+    @app.get("/trader/calendar")
+    def get_trader_calendar(
+        session: Session = Depends(get_session),
+        start: str | None = None,
+        end: str | None = None,
+    ) -> dict[str, Any]:
+        """Per-day realized P&L for a P&L calendar (Phase 2). start/end (YYYY-MM-DD,
+        ET) bound the Alpaca order pull; days are bucketed by round-trip exit."""
+        reader = _reader()
+        if reader is None:
+            return {"configured": False, "days": {}}
+        try:
+            orders = reader.orders(status="all", limit=500, after=start, until=end)
+            return {"available": True, **_trader.calendar_view(orders, session)}
+        except Exception:  # noqa: BLE001
+            log.warning("trader calendar fetch failed", exc_info=True)
+            return {"configured": True, "available": False, "days": {}}
+
+    @app.get("/trader/day")
+    def get_trader_day(
+        date: str,
+        session: Session = Depends(get_session),
+    ) -> dict[str, Any]:
+        """One day's detail: this account's round-trips exited that day + any EOD
+        report cards from sim_daily_summary (flagged prior_account honestly)."""
+        reader = _reader()
+        if reader is None:
+            return {"configured": False, "date": date, "round_trips": [], "report_cards": []}
+        try:
+            acct = reader.account()
+            inception = _trader.account_view(acct, None).get("inception_date")
+            orders = reader.orders(status="all", limit=500)
+            return {
+                "available": True,
+                **_trader.day_view(orders, session, date=date, account_inception=inception),
+            }
+        except Exception:  # noqa: BLE001
+            log.warning("trader day fetch failed", exc_info=True)
+            return {
+                "configured": True,
+                "available": False,
+                "date": date,
+                "round_trips": [],
+                "report_cards": [],
+            }
+
+    @app.get("/trader/markers/{ticker}")
+    def get_trader_markers(
+        ticker: str, session: Session = Depends(get_session)
+    ) -> dict[str, Any]:
+        """Entry/exit fills for ONE ticker, for markers on the ticker candle chart.
+        Empty markers when unconfigured or the account never traded this name."""
+        reader = _reader()
+        if reader is None:
+            return {"configured": False, "ticker": ticker.upper(), "markers": []}
+        try:
+            orders = reader.orders(status="all", limit=500)
+            return {"available": True, **_trader.markers_view(orders, ticker, session)}
+        except Exception:  # noqa: BLE001
+            log.warning("trader markers fetch failed", exc_info=True)
+            return {"configured": True, "available": False, "ticker": ticker.upper(), "markers": []}
+
     @app.get("/tickers/{ticker}/sim/bars")
     def get_sim_bars(ticker: str, hours: int = Query(24, ge=1, le=168)) -> dict[str, Any]:
         """Minute bars incl. pre/post-market from ALPACA (IEX feed), cache-backed —

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { IChartApi, UTCTimestamp } from "lightweight-charts";
 import type { IntradayBar, PricePoint } from "@/lib/ticker";
+import type { TradeMarker } from "@/lib/trader";
 import { isChunkError, reloadOnceForStaleChunk } from "@/lib/chunkGuard";
 
 /**
@@ -28,12 +29,17 @@ export default function PriceChart({
   mode,
   height = 300,
   intraday = null,
+  markers = null,
 }: {
   price: PricePoint[];
   mode: "candle" | "line";
   height?: number;
   /** Real intraday bars; when present they replace the daily series. */
   intraday?: IntradayBar[] | null;
+  /** This account's entry/exit fills, overlaid on the DAILY series by ET date.
+   *  Ignored on the intraday view (its epochs are ET-shifted server-side, so a
+   *  UTC marker wouldn't align). */
+  markers?: TradeMarker[] | null;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -48,8 +54,15 @@ export default function PriceChart({
 
     import("lightweight-charts").then((LWC) => {
       if (disposed || !ref.current) return;
-      const { createChart, CandlestickSeries, LineSeries, HistogramSeries, ColorType, CrosshairMode } =
-        LWC;
+      const {
+        createChart,
+        CandlestickSeries,
+        LineSeries,
+        HistogramSeries,
+        ColorType,
+        CrosshairMode,
+        createSeriesMarkers,
+      } = LWC;
       chart = createChart(el, {
         width: el.clientWidth,
         height,
@@ -92,6 +105,7 @@ export default function PriceChart({
             extended: false,
           }));
 
+      let mainSeries;
       if (mode === "candle") {
         const s = chart.addSeries(CandlestickSeries, {
           upColor: UP,
@@ -119,10 +133,32 @@ export default function PriceChart({
               : {}),
           })),
         );
+        mainSeries = s;
       } else {
         const s = chart.addSeries(LineSeries, { color: "#4fd1c5", lineWidth: 2 });
         s.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: 0.28 } });
         s.setData(rows.map((r) => ({ time: r.time, value: r.close })));
+        mainSeries = s;
+      }
+
+      // Trade markers (this account's entry/exit fills) on the DAILY series only —
+      // keyed by ET date to match the daily time axis. Buy = teal up-arrow below
+      // the bar; sell = red down-arrow above. Skipped on the intraday view.
+      if (!useIntraday && markers && markers.length > 0) {
+        const seen = new Set(rows.map((r) => String(r.time)));
+        const sm = markers
+          .filter((m) => m.date && seen.has(m.date))
+          .map((m) => {
+            const isBuy = m.side === "buy";
+            return {
+              time: m.date as unknown as UTCTimestamp,
+              position: (isBuy ? "belowBar" : "aboveBar") as "belowBar" | "aboveBar",
+              color: isBuy ? UP : DOWN,
+              shape: (isBuy ? "arrowUp" : "arrowDown") as "arrowUp" | "arrowDown",
+              text: `${m.kind === "entry" ? "IN" : "OUT"} ${m.qty}`,
+            };
+          });
+        if (sm.length > 0) createSeriesMarkers(mainSeries, sm);
       }
 
       const vol = chart.addSeries(HistogramSeries, {
@@ -156,7 +192,7 @@ export default function PriceChart({
       if (onResize) window.removeEventListener("resize", onResize);
       if (chart) chart.remove();
     };
-  }, [price, mode, height, intraday, useIntraday]);
+  }, [price, mode, height, intraday, useIntraday, markers]);
 
   if (loadFailed) {
     return (

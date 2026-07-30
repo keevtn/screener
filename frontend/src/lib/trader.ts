@@ -118,6 +118,64 @@ export interface BlotterResult {
 
 export type BlotterScope = "closed" | "open" | "today" | "all";
 
+export interface CalendarCell {
+  realized_pl: number;
+  trips: number;
+  wins: number;
+  losses: number;
+}
+
+export interface CalendarResult {
+  configured: boolean;
+  available: boolean;
+  reachable: boolean;
+  days: Record<string, CalendarCell>;
+}
+
+export interface ReportCard {
+  session_date: string;
+  config_id: string;
+  config_name: string;
+  trades: number;
+  open_eod: number;
+  wins: number;
+  losses: number;
+  hit_rate: number | null;
+  mean_net: number | null;
+  sum_net: number | null;
+  pnl_dollars: number | null;
+  spy_ref: number | null;
+  gate_ref: string | null;
+  prior_account: boolean;
+}
+
+export interface DayResult {
+  configured: boolean;
+  available: boolean;
+  reachable: boolean;
+  date: string;
+  round_trips: RoundTrip[];
+  report_cards: ReportCard[];
+  account_inception: string | null;
+}
+
+export interface TradeMarker {
+  time: number; // epoch seconds
+  date: string | null; // ET trading date (YYYY-MM-DD), for daily-chart alignment
+  price: number;
+  side: string; // buy | sell
+  kind: string; // entry | exit
+  qty: number;
+}
+
+export interface MarkersResult {
+  configured: boolean;
+  available: boolean;
+  reachable: boolean;
+  ticker: string;
+  markers: TradeMarker[];
+}
+
 /** Timeframe presets for the equity curve — (label, Alpaca period, timeframe). */
 export const CURVE_TIMEFRAMES: { label: string; period: string; timeframe: string }[] = [
   { label: "1D", period: "1D", timeframe: "5Min" },
@@ -245,4 +303,37 @@ export function etToday(): string {
     day: "2-digit",
   }).format(new Date());
   return parts; // en-CA gives YYYY-MM-DD
+}
+
+export function fetchCalendar(start: string, end: string): Promise<CalendarResult> {
+  const p = new URLSearchParams({ start, end });
+  return getJson<CalendarResult>(`/trader/calendar?${p}`, {
+    configured: false,
+    available: false,
+    reachable: false,
+    days: {},
+  });
+}
+
+export function fetchDay(date: string): Promise<DayResult> {
+  const p = new URLSearchParams({ date });
+  return getJson<DayResult>(`/trader/day?${p}`, {
+    configured: false,
+    available: false,
+    reachable: false,
+    date,
+    round_trips: [],
+    report_cards: [],
+    account_inception: null,
+  });
+}
+
+export function fetchMarkers(ticker: string): Promise<MarkersResult> {
+  return getJson<MarkersResult>(`/trader/markers/${encodeURIComponent(ticker.toUpperCase())}`, {
+    configured: false,
+    available: false,
+    reachable: false,
+    ticker: ticker.toUpperCase(),
+    markers: [],
+  });
 }

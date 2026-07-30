@@ -26,6 +26,7 @@ import {
   type SearchHourly,
 } from "@/lib/ticker";
 import { fetchNewsForTicker } from "@/lib/api";
+import { fetchMarkers, type TradeMarker } from "@/lib/trader";
 import { toneColor, toneTag } from "@/lib/tape/insight";
 import { fmtET } from "@/lib/tape/time";
 
@@ -64,6 +65,9 @@ export default function TickerDetailBody({ ticker }: { ticker: string }) {
   const [msgTotals, setMsgTotals] = useState<DensityTotals | null>(null);
   const [chartMode, setChartMode] = useState<"candle" | "line">("candle");
   const [clusters, setClusters] = useState<ClusterItem[]>([]);
+  // This account's entry/exit fills for the ticker, overlaid on the daily chart.
+  // Empty (no markers) when Alpaca keys aren't set or the account never traded it.
+  const [markers, setMarkers] = useState<TradeMarker[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -83,6 +87,16 @@ export default function TickerDetailBody({ ticker }: { ticker: string }) {
     let cancelled = false;
     fetchTickerClusters(ticker, 40).then((c) => {
       if (!cancelled) setClusters(c);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [ticker]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchMarkers(ticker).then((r) => {
+      if (!cancelled) setMarkers(r.markers ?? []);
     });
     return () => {
       cancelled = true;
@@ -282,7 +296,7 @@ export default function TickerDetailBody({ ticker }: { ticker: string }) {
                       </div>
                     </div>
                   ) : (
-                    <PriceChart price={priceView} mode={chartMode} />
+                    <PriceChart price={priceView} mode={chartMode} markers={markers} />
                   )}
                 </>
               );

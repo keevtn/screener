@@ -250,3 +250,52 @@ def test_round_trip_no_match_is_null(session):
     }]
     enriched = trader.enrich_round_trips(trips, session)
     assert enriched[0]["provenance"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2: calendar / day / markers
+# --------------------------------------------------------------------------- #
+def _closed_orders():
+    return [
+        {"symbol": "AAPL", "side": "buy", "status": "filled", "filled_qty": "10",
+         "filled_avg_price": "100", "id": "o1", "filled_at": "2026-07-20T14:00:00Z"},
+        {"symbol": "AAPL", "side": "sell", "status": "filled", "filled_qty": "10",
+         "filled_avg_price": "110", "id": "o2", "filled_at": "2026-07-20T18:00:00Z"},
+    ]
+
+
+def test_calendar_buckets_by_exit_date(session):
+    v = trader.calendar_view(_closed_orders(), session)
+    # 14:00Z / 18:00Z on 2026-07-20 are both same ET day (2026-07-20).
+    assert "2026-07-20" in v["days"]
+    cell = v["days"]["2026-07-20"]
+    assert cell["realized_pl"] == 100.0
+    assert cell["trips"] == 1
+    assert cell["wins"] == 1
+
+
+def test_markers_entry_then_exit(session):
+    v = trader.markers_view(_closed_orders(), "AAPL", session)
+    assert len(v["markers"]) == 2
+    assert v["markers"][0]["kind"] == "entry"
+    assert v["markers"][0]["side"] == "buy"
+    assert v["markers"][1]["kind"] == "exit"
+    assert v["markers"][1]["date"] == "2026-07-20"
+
+
+def test_day_view_report_card_prior_account_flag(session):
+    from datetime import date
+
+    from pipeline.common.models import SimDailySummary
+
+    now = datetime(2026, 7, 20, 13, 30, tzinfo=UTC)
+    session.add(SimDailySummary(
+        session_date=date(2026, 5, 1), config_id="cfg1", config_name="old-strat",
+        trades=3, open_eod=0, wins=2, losses=1, hit_rate=0.66, pnl_dollars=42.0,
+        updated_at=now,
+    ))
+    session.commit()
+    # account opened 2026-06-01 -> the 2026-05-01 card is from the prior portfolio.
+    v = trader.day_view([], session, date="2026-05-01", account_inception="2026-06-01")
+    assert len(v["report_cards"]) == 1
+    assert v["report_cards"][0]["prior_account"] is True

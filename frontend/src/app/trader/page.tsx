@@ -7,14 +7,20 @@ import TraderHeader from "@/components/tape/TraderHeader";
 import EquityCurve from "@/components/tape/EquityCurve";
 import PositionsTable from "@/components/tape/PositionsTable";
 import TraderBlotter from "@/components/tape/TraderBlotter";
+import PnlCalendar from "@/components/tape/PnlCalendar";
+import DayDetail from "@/components/tape/DayDetail";
 import {
   CURVE_TIMEFRAMES,
   fetchBlotter,
+  fetchCalendar,
+  fetchDay,
   fetchPortfolioHistory,
   fetchPositions,
   fetchTraderAccount,
   type BlotterResult,
   type BlotterScope,
+  type CalendarResult,
+  type DayResult,
   type PortfolioHistory,
   type PositionsResult,
   type TraderAccount,
@@ -72,6 +78,13 @@ export default function TraderPage() {
   const [scope, setScope] = useState<BlotterScope>("closed");
   const [configFilter, setConfigFilter] = useState<string>(""); // config_id, "" = all
 
+  // History view (Phase 2): P&L calendar + selected-day detail.
+  const [view, setView] = useState<"overview" | "history">("overview");
+  const [monthDate, setMonthDate] = useState<Date>(() => new Date());
+  const [calendar, setCalendar] = useState<CalendarResult | null>(null);
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [dayData, setDayData] = useState<DayResult | null>(null);
+
   // Account + positions poll together (the live pulse of the page).
   useEffect(() => {
     let cancelled = false;
@@ -120,6 +133,36 @@ export default function TraderPage() {
     };
   }, [scope]);
 
+  // Calendar loads for the displayed month while the History view is active.
+  useEffect(() => {
+    if (view !== "history") return;
+    let cancelled = false;
+    const first = `${monthDate.getFullYear()}-${String(monthDate.getMonth() + 1).padStart(2, "0")}-01`;
+    const lastDay = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0).getDate();
+    const last = `${monthDate.getFullYear()}-${String(monthDate.getMonth() + 1).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
+    fetchCalendar(first, last).then((c) => {
+      if (!cancelled) setCalendar(c);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, monthDate]);
+
+  // Selected-day detail.
+  useEffect(() => {
+    if (!selectedDay) {
+      setDayData(null);
+      return;
+    }
+    let cancelled = false;
+    fetchDay(selectedDay).then((d) => {
+      if (!cancelled) setDayData(d);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDay]);
+
   // Config options derived from whatever provenance the blotter surfaced.
   const configOptions = useMemo(() => {
     const m = new Map<string, string>();
@@ -164,7 +207,51 @@ export default function TraderPage() {
         <>
           {account && <TraderHeader account={account} />}
 
+          <div
+            className="shrink-0 flex items-center gap-1 px-[22px] py-2 border-b border-tape-border bg-tape-panel-2"
+            role="group"
+            aria-label="Trader view"
+          >
+            {(["overview", "history"] as const).map((v) => (
+              <button
+                key={v}
+                onClick={() => setView(v)}
+                aria-pressed={view === v}
+                className={`px-3 py-1 rounded tape-mono text-[11px] tracking-[0.1em] uppercase ${
+                  view === v
+                    ? "bg-tape-panel text-tape-accent border border-tape-border"
+                    : "text-tape-faint hover:text-tape-sub border border-transparent"
+                }`}
+              >
+                {v}
+              </button>
+            ))}
+          </div>
+
           <div className="flex-1 overflow-y-auto">
+            {view === "history" ? (
+              <>
+                <PnlCalendar
+                  monthDate={monthDate}
+                  data={calendar}
+                  selected={selectedDay}
+                  onSelect={setSelectedDay}
+                  onPrev={() => setMonthDate((d) => new Date(d.getFullYear(), d.getMonth() - 1, 1))}
+                  onNext={() => setMonthDate((d) => new Date(d.getFullYear(), d.getMonth() + 1, 1))}
+                />
+                {calendar && calendar.available === false && (
+                  <Empty>P&L calendar temporarily unavailable.</Empty>
+                )}
+                {selectedDay && dayData ? (
+                  <DayDetail day={dayData} />
+                ) : (
+                  <div className="px-[22px] py-6 tape-mono text-[11px] text-tape-faint text-center border-t border-tape-border">
+                    Select a day to see its round-trips and EOD report card.
+                  </div>
+                )}
+              </>
+            ) : (
+            <>
             {/* EQUITY CURVE */}
             <Section
               title="Equity Curve"
@@ -279,6 +366,8 @@ export default function TraderPage() {
                 <TraderBlotter items={blotterItems} />
               )}
             </Section>
+            </>
+            )}
           </div>
         </>
       )}

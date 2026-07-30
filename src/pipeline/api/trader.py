@@ -72,6 +72,8 @@ def account_view(account: dict[str, Any], clock: dict[str, Any] | None) -> dict[
         "status": account.get("status"),
         "currency": account.get("currency", "USD"),
         "endpoint": account.get("endpoint"),  # proves the paper host was read
+        "created_at": account.get("created_at"),
+        "inception_date": _et_date(account.get("created_at")),
         "equity": equity,
         "last_equity": last_equity,
         "cash": _f(account.get("cash")),
@@ -394,19 +396,27 @@ def _trades_by_order_id(session: Session, order_ids: list[str]) -> dict[str, Sim
 # --------------------------------------------------------------------------- #
 # blotter assembly
 # --------------------------------------------------------------------------- #
+try:  # stdlib on 3.9+; the app targets 3.12
+    from zoneinfo import ZoneInfo
+
+    _ET = ZoneInfo("America/New_York")
+except Exception:  # noqa: BLE001 — never fatal; fall back to naive UTC dates
+    _ET = None  # type: ignore[assignment]
+
+
 def _et_date(iso_ts: str | None) -> str | None:
-    """The ET calendar date of an ISO timestamp (Alpaca stamps are UTC 'Z' or
-    offset ISO). Best-effort; None on unparseable. Used only for the 'today'
-    filter, so a miss just excludes the row from 'today', never crashes."""
+    """The ET calendar date (YYYY-MM-DD) of an ISO timestamp. Alpaca stamps are
+    UTC 'Z' or offset ISO; we convert to US/Eastern so a fill just after the open
+    or just before the close buckets on the correct trading day. None on
+    unparseable (the row is simply excluded from a date bucket, never crashes)."""
     if not iso_ts:
         return None
     try:
         dt = datetime.fromisoformat(str(iso_ts).replace("Z", "+00:00"))
     except ValueError:
         return None
-    # Convert to US/Eastern without a tz dependency: Alpaca offset ISO already
-    # encodes the zone for calendar rows; for UTC stamps we approximate ET as
-    # UTC-4/5. We only need day bucketing, and callers pass the ET 'today' string.
+    if _ET is not None and dt.tzinfo is not None:
+        dt = dt.astimezone(_ET)
     return dt.date().isoformat()
 
 
@@ -442,3 +452,142 @@ def blotter_view(
     if config_id:
         trips = [t for t in trips if (t.get("provenance") or {}).get("config_id") == config_id]
     return {"configured": True, "scope": scope, "count": len(trips), "items": trips}
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2: history + context (P&L calendar, day detail, chart markers)
+# --------------------------------------------------------------------------- #
+def calendar_view(orders: list[dict[str, Any]], session: Session) -> dict[str, Any]:
+    """Per-day realized P&L for a month grid, bucketed by each round-trip's exit
+    ET date. A fresh account yields an empty ``days`` map, which the UI renders as
+    an intentional blank calendar (never an error)."""
+    trips = enrich_round_trips(pair_round_trips(fills_from_orders(orders)), session)
+    days: dict[str, dict[str, Any]] = {}
+    for t in trips:
+        d = _et_date(t.get("exit_time"))
+        if d is None:
+            continue
+        cell = days.setdefault(d, {"realized_pl": 0.0, "trips": 0, "wins": 0, "losses": 0})
+        cell["realized_pl"] = round(cell["realized_pl"] + (t.get("realized_pl") or 0.0), 2)
+        cell["trips"] += 1
+        if (t.get("realized_pl") or 0.0) >= 0:
+            cell["wins"] += 1
+        else:
+            cell["losses"] += 1
+    return {"configured": True, "days": days}
+
+
+def day_view(
+    orders: list[dict[str, Any]],
+    session: Session,
+    *,
+    date: str,
+    account_inception: str | None = None,
+) -> dict[str, Any]:
+    """One day's detail: this account's round-trips exited on ``date`` (ET) + any
+    EOD report cards from sim_daily_summary for that session.
+
+    HONESTY: report cards are keyed by session_date across ALL history, so a card
+    dated before this paper account existed is from the PRIOR portfolio. We flag
+    each card ``prior_account`` when its date precedes ``account_inception`` so the
+    UI can label it truthfully rather than implying the current book produced it."""
+    trips = [
+        t
+        for t in enrich_round_trips(pair_round_trips(fills_from_orders(orders)), session)
+        if _et_date(t.get("exit_time")) == date
+    ]
+    cards = _report_cards_for_date(session, date, account_inception)
+    return {
+        "configured": True,
+        "date": date,
+        "round_trips": trips,
+        "report_cards": cards,
+        "account_inception": account_inception,
+    }
+
+
+def _report_cards_for_date(
+    session: Session, date: str, account_inception: str | None
+) -> list[dict[str, Any]]:
+    """sim_daily_summary rows for a session date, each flagged prior_account when
+    it predates this paper account. Returns [] (never raises) if the rollup table
+    doesn't exist yet."""
+    from pipeline.common.models import SimDailySummary
+
+    try:
+        rows = (
+            session.execute(
+                select(SimDailySummary)
+                .where(SimDailySummary.session_date == date)
+                .order_by(SimDailySummary.config_name)
+            )
+            .scalars()
+            .all()
+        )
+    except Exception:  # noqa: BLE001 — table may not exist until the driver's first EOD
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        sd = r.session_date.isoformat() if hasattr(r.session_date, "isoformat") else str(r.session_date)
+        out.append(
+            {
+                "session_date": sd,
+                "config_id": r.config_id,
+                "config_name": r.config_name,
+                "trades": r.trades,
+                "open_eod": r.open_eod,
+                "wins": r.wins,
+                "losses": r.losses,
+                "hit_rate": r.hit_rate,
+                "mean_net": r.mean_net,
+                "sum_net": r.sum_net,
+                "pnl_dollars": r.pnl_dollars,
+                "spy_ref": r.spy_ref,
+                "gate_ref": r.gate_ref,
+                # honest provenance label
+                "prior_account": bool(account_inception and sd < account_inception),
+            }
+        )
+    return out
+
+
+def markers_view(orders: list[dict[str, Any]], ticker: str, session: Session) -> dict[str, Any]:
+    """Entry/exit fills for ONE ticker, shaped for chart markers on the ticker
+    page's candle chart. Each marker: {time (epoch s), price, side (buy|sell),
+    kind (entry|exit), qty}. Kind is inferred by FIFO-pairing this ticker's fills
+    so a marker reads as opening or closing a position."""
+    tk = ticker.upper()
+    fills = [f for f in fills_from_orders(orders) if f["symbol"] == tk]
+    if not fills:
+        return {"configured": True, "ticker": tk, "markers": []}
+    # Re-derive entry/exit role via the same signed-FIFO logic the blotter uses.
+    ordered = sorted(fills, key=lambda f: (f.get("time") is None, str(f.get("time") or "")))
+    position = 0.0
+    markers: list[dict[str, Any]] = []
+    for f in ordered:
+        signed = f["qty"] if f["side"] == "buy" else -f["qty"]
+        # A fill that moves |position| toward zero is (at least partly) an exit.
+        kind = "exit" if position != 0 and (position > 0) != (signed > 0) else "entry"
+        markers.append(
+            {
+                "time": _epoch(f.get("time")),
+                "date": _et_date(f.get("time")),  # ET trading date, for daily-chart alignment
+                "price": f["price"],
+                "side": f["side"],
+                "kind": kind,
+                "qty": f["qty"],
+            }
+        )
+        position += signed
+    markers = [m for m in markers if m["time"] is not None]
+    markers.sort(key=lambda m: m["time"])
+    return {"configured": True, "ticker": tk, "markers": markers}
+
+
+def _epoch(iso_ts: str | None) -> int | None:
+    if not iso_ts:
+        return None
+    try:
+        return int(datetime.fromisoformat(str(iso_ts).replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
