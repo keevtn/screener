@@ -173,6 +173,11 @@ class HealthOut(BaseModel):
     # Bluesky firehose liveness (from its heartbeat file) — a dead stream is loud,
     # not silent, since social continuity is the Phase-6 baseline clock.
     firehose: dict[str, Any] | None = None
+    # Scoring backend state — makes "onnx FinBERT silently fell back to lexicon"
+    # (which kills finbert_sign trading) checkable from outside forever. The
+    # load-bearing field is finbert_scores_recent: if 0 while clusters are scoring,
+    # FinBERT is NOT producing scores no matter what the env says.
+    scoring: dict[str, Any] | None = None
 
 
 class RankingItemOut(BaseModel):
@@ -1296,6 +1301,24 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
         }
         from pipeline.ingest.firehose import DEFAULT_STATUS_PATH, liveness, read_status
 
+        # Scoring backend state (env + on-disk model + EMPIRICAL finbert output).
+        import os as _os
+        from pathlib import Path as _Path
+
+        from pipeline.common.models import ClusterScore as _CS
+
+        _model_path = _os.environ.get("FINBERT_ONNX_PATH", "data/models/finbert-int8.onnx")
+        _recent = session.execute(
+            select(_CS.finbert_score).order_by(_CS.created_at.desc()).limit(200)
+        ).scalars().all()
+        scoring = {
+            "sentiment_mode": _os.environ.get("SENTIMENT_MODE", "lexicon"),
+            "finbert_url_set": bool(_os.environ.get("FINBERT_ONNX_URL")),
+            "finbert_model_present": _Path(_model_path).exists(),
+            "cluster_scores_recent": len(_recent),
+            "finbert_scores_recent": sum(1 for s in _recent if s is not None),
+        }
+
         return HealthOut(
             now=now,
             raw_items=session.execute(select(func.count()).select_from(RawItem)).scalar_one(),
@@ -1305,6 +1328,7 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
             staleness_seconds=((now - last).total_seconds() if last else None),
             per_source_class=per_class,
             firehose=liveness(read_status(DEFAULT_STATUS_PATH)),
+            scoring=scoring,
         )
 
     # --- signal lab (5c.4): clean-only + holdout-excluded + backfill-excluded by default ---
