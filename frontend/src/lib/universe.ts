@@ -120,20 +120,25 @@ export async function fetchUniverseScreen(f: UniverseFilters): Promise<UniverseR
 }
 
 // --- display formatters (Finviz units) --------------------------------------
+// Guard with Number.isFinite (not just `== null`): a REAL DB column can hand back
+// a non-numeric string (SQLite is dynamically typed), and `"ts".toFixed()` throws.
+// A non-number renders as an honest "—" rather than crashing the row/panel.
 export function fmtMcap(m: number | null): string {
-  if (m == null) return "—";
-  if (m >= 1e6) return `$${(m / 1e6).toFixed(2)}T`;
-  if (m >= 1e3) return `$${(m / 1e3).toFixed(1)}B`;
-  return `$${m.toFixed(0)}M`;
+  if (!Number.isFinite(m as number)) return "—";
+  const n = m as number;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}T`;
+  if (n >= 1e3) return `$${(n / 1e3).toFixed(1)}B`;
+  return `$${n.toFixed(0)}M`;
 }
 
 export function fmtVol(v: number | null): string {
-  if (v == null) return "—";
-  return v >= 1000 ? `${(v / 1000).toFixed(1)}M` : `${v.toFixed(0)}K`;
+  if (!Number.isFinite(v as number)) return "—";
+  const n = v as number;
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}M` : `${n.toFixed(0)}K`;
 }
 
 export function fmtPct(v: number | null): string {
-  return v == null ? "—" : `${(v * 100).toFixed(1)}%`;
+  return Number.isFinite(v as number) ? `${((v as number) * 100).toFixed(1)}%` : "—";
 }
 
 // Finviz market-cap buckets (values in $millions).

@@ -42,6 +42,7 @@ from pipeline.common.approval import ApprovalError, approve_change, reject_chang
 from pipeline.common.config import get_or_create_config
 from pipeline.common.db import ensure_indexes, make_engine
 from pipeline.common.events import event_stream, intraday_counts, publish_event
+from pipeline.common.nums import to_float
 from pipeline.common.models import (
     AttentionDaily,
     BuzzBaseline,
@@ -1773,20 +1774,24 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
         ).scalars():
             earnings.setdefault(ev.ticker, ev.event_date.isoformat())
 
+        # Every numeric field goes through to_float: SQLite can hand back a TEXT
+        # value in a REAL column (a positional seed copy once shifted a timestamp
+        # into `price`), and a JSON string there crashes the frontend's toFixed.
+        # to_float yields a real number or null — never a crashing string.
         items = [
             {
                 "ticker": f.ticker,
                 "name": name,
                 "sector": f.sector,
                 "industry": f.industry,
-                "market_cap": f.market_cap,
-                "price": f.price,
-                "change_pct": f.change_pct,
-                "avg_volume": f.avg_volume,
-                "short_float": f.short_float,
-                "inst_own": f.inst_own,
-                "insider_own": f.insider_own,
-                "beta": f.beta,
+                "market_cap": to_float(f.market_cap),
+                "price": to_float(f.price),
+                "change_pct": to_float(f.change_pct),
+                "avg_volume": to_float(f.avg_volume),
+                "short_float": to_float(f.short_float),
+                "inst_own": to_float(f.inst_own),
+                "insider_own": to_float(f.insider_own),
+                "beta": to_float(f.beta),
                 "signal": signal.get(f.ticker),
                 "next_earnings": earnings.get(f.ticker),
             }

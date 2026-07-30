@@ -264,22 +264,24 @@ export function fetchBlotter(scope: BlotterScope, configId?: string): Promise<Bl
 }
 
 // --- formatting helpers (shared across the TRADER components) --------------
-/** $ with thousands separators; `dp` decimals. em-dash for null. */
+// All guard with `typeof number && Number.isFinite`: a REAL DB / JSON field can
+// arrive as a non-numeric string, and calling a number method on it throws.
+/** $ with thousands separators; `dp` decimals. em-dash for non-numbers. */
 export function fmtUsd(n: number | null | undefined, dp = 2): string {
-  if (n == null || Number.isNaN(n)) return "—";
+  if (typeof n !== "number" || !Number.isFinite(n)) return "—";
   return "$" + n.toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: dp });
 }
 
 /** Signed $ (+/-) for P&L cells. */
 export function fmtSignedUsd(n: number | null | undefined, dp = 2): string {
-  if (n == null || Number.isNaN(n)) return "—";
+  if (typeof n !== "number" || !Number.isFinite(n)) return "—";
   const s = fmtUsd(Math.abs(n), dp);
   return n < 0 ? `-${s}` : `+${s}`;
 }
 
 /** Fraction -> signed percent string (0.0123 -> "+1.23%"). */
 export function fmtPct(n: number | null | undefined, dp = 2): string {
-  if (n == null || Number.isNaN(n)) return "—";
+  if (typeof n !== "number" || !Number.isFinite(n)) return "—";
   return `${n >= 0 ? "+" : ""}${(n * 100).toFixed(dp)}%`;
 }
 

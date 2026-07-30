@@ -42,6 +42,7 @@ from pipeline.common.models import (
     RawItem,
     SearchInterestDaily,
 )
+from pipeline.common.nums import to_float
 from pipeline.common.timeutil import utcnow
 
 # SQLite caps host parameters per statement (default 999); chunk IN() lists well
@@ -273,10 +274,12 @@ def _fundamentals_by_ticker(session: Session, tickers: list[str]) -> dict[str, d
                 "name": name,
                 "sector": f.sector,
                 "industry": f.industry,
-                "market_cap": f.market_cap,
-                "avg_volume": f.avg_volume,
-                "short_float": f.short_float,
-                "beta": f.beta,
+                # to_float: a REAL column can physically hold TEXT in SQLite; emit a
+                # real number or null, never a string that crashes toFixed downstream.
+                "market_cap": to_float(f.market_cap),
+                "avg_volume": to_float(f.avg_volume),
+                "short_float": to_float(f.short_float),
+                "beta": to_float(f.beta),
             }
     return out
 

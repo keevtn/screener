@@ -217,12 +217,14 @@ function PriceCell({ row, index }: { row: ScreenerRow; index: number }) {
   const isAvg = todayK == null && avgK != null;
   return (
     <div style={{ display: "grid", gridTemplateColumns: T_PRICE, alignItems: "center", ...groupCell(index, mono(11.5)) }}>
-      <span style={{ color: C.text }}>{p.last == null ? "—" : p.last.toFixed(2)}</span>
-      <span style={{ color: p.pctChange == null ? C.faint : signColor(p.pctChange) }}>
-        {p.pctChange == null ? "—" : `${p.pctChange > 0 ? "+" : ""}${p.pctChange.toFixed(1)}%`}
+      <span style={{ color: C.text }}>{Number.isFinite(p.last as number) ? (p.last as number).toFixed(2) : "—"}</span>
+      <span style={{ color: Number.isFinite(p.pctChange as number) ? signColor(p.pctChange as number) : C.faint }}>
+        {Number.isFinite(p.pctChange as number)
+          ? `${(p.pctChange as number) > 0 ? "+" : ""}${(p.pctChange as number).toFixed(1)}%`
+          : "—"}
       </span>
-      <span style={{ color: p.volOverAvg == null ? C.faint : C.muted, ...mono(11) }}>
-        {p.volOverAvg == null ? "—" : `${p.volOverAvg.toFixed(1)}×`}
+      <span style={{ color: Number.isFinite(p.volOverAvg as number) ? C.muted : C.faint, ...mono(11) }}>
+        {Number.isFinite(p.volOverAvg as number) ? `${(p.volOverAvg as number).toFixed(1)}×` : "—"}
       </span>
       <span
         style={{ color: volK == null ? C.faint : isAvg ? C.muted : C.text, whiteSpace: "nowrap" }}

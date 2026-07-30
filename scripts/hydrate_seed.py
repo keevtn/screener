@@ -136,7 +136,22 @@ def main() -> None:
                 if before > 0 and not args.force:
                     skipped.append(t)  # live history present — don't clobber
                     continue
-                con.execute(f'INSERT OR IGNORE INTO main."{t}" SELECT * FROM seed."{t}"')
+                # Copy by COLUMN NAME, not `SELECT *`. The seed inherits the SOURCE
+                # DB's physical column order, which can differ from the live schema
+                # created by init_db (e.g. fundamentals_snapshots had price/change_pct
+                # ALTER-appended after created_at on the source, but the model defines
+                # them before it). A positional `SELECT *` then shifts values into the
+                # wrong columns — that's how a created_at TIMESTAMP once landed in the
+                # numeric `price` column and crashed the UNIVERSE panel. Intersecting on
+                # name in the live table's order makes the copy order-independent.
+                main_cols = [r[1] for r in con.execute(f'PRAGMA main.table_info("{t}")').fetchall()]
+                seed_cols = {r[1] for r in con.execute(f'PRAGMA seed.table_info("{t}")').fetchall()}
+                cols = [c for c in main_cols if c in seed_cols]
+                collist = ", ".join(f'"{c}"' for c in cols)
+                con.execute(
+                    f'INSERT OR IGNORE INTO main."{t}" ({collist}) '
+                    f'SELECT {collist} FROM seed."{t}"'
+                )
                 after = con.execute(f'SELECT COUNT(*) FROM main."{t}"').fetchone()[0]
                 inserted[t] = after - before
         con.execute("DETACH DATABASE seed")

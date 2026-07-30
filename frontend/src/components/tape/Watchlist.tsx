@@ -146,7 +146,7 @@ export default function Watchlist() {
                   {p.premarket?.pm_pct == null ? "—" : fmtPct(p.premarket.pm_pct)}
                 </td>
                 <td className={`px-2 py-2 text-right tabular-nums ${p.buzz_z == null ? "text-tape-faint" : "text-tape-sub"}`}>
-                  {p.buzz_z == null ? "—" : p.buzz_z.toFixed(1)}
+                  {Number.isFinite(p.buzz_z as number) ? (p.buzz_z as number).toFixed(1) : "—"}
                 </td>
                 <td className="px-3 py-2 max-w-[26rem]">
                   {p.catalyst?.headline ? (
@@ -227,7 +227,7 @@ export default function Watchlist() {
                   {m.reg_pct == null ? "—" : fmtPct(m.reg_pct)}
                 </td>
                 <td className="px-2 py-2 text-right tabular-nums text-tape-sub">
-                  {m.prior_close == null ? "—" : m.prior_close.toFixed(2)}
+                  {Number.isFinite(m.prior_close as number) ? (m.prior_close as number).toFixed(2) : "—"}
                 </td>
                 <td className="px-2 py-2 text-right">
                   {pinned.has(m.ticker) ? (

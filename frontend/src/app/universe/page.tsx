@@ -20,6 +20,14 @@ import {
   type UniverseResult,
 } from "@/lib/universe";
 
+/** Format a value only if it's really a finite number; else honest "—". Guards
+ *  against a non-numeric string arriving from a REAL DB column (SQLite is
+ *  dynamically typed) — one bad row must never crash the panel via toFixed. */
+function fin(v: unknown, dp: number, suffix = "", plus = false): string {
+  if (typeof v !== "number" || !Number.isFinite(v)) return "—";
+  return `${plus && v >= 0 ? "+" : ""}${v.toFixed(dp)}${suffix}`;
+}
+
 /**
  * TAPE_ UNIVERSE — the Finviz-style whole-market screener.
  *
@@ -321,28 +329,24 @@ export default function UniversePage() {
                     {r.industry ?? "—"}
                   </td>
                   <td className="px-2 py-2 text-tape-sub text-right">{fmtMcap(r.market_cap)}</td>
-                  <td className="px-2 py-2 text-tape-text text-right">
-                    {r.price == null ? "—" : r.price.toFixed(2)}
-                  </td>
+                  <td className="px-2 py-2 text-tape-text text-right">{fin(r.price, 2)}</td>
                   <td
                     className={`px-2 py-2 text-right ${
-                      r.change_pct == null
+                      typeof r.change_pct !== "number" || !Number.isFinite(r.change_pct)
                         ? "text-tape-faint"
                         : r.change_pct >= 0
                         ? "text-tape-bull"
                         : "text-tape-bear"
                     }`}
                   >
-                    {r.change_pct == null
-                      ? "—"
-                      : `${r.change_pct >= 0 ? "+" : ""}${(r.change_pct * 100).toFixed(1)}%`}
+                    {typeof r.change_pct === "number" && Number.isFinite(r.change_pct)
+                      ? fin(r.change_pct * 100, 1, "%", true)
+                      : "—"}
                   </td>
                   <td className="px-2 py-2 text-tape-muted text-right">{fmtVol(r.avg_volume)}</td>
                   <td className="px-2 py-2 text-tape-sub text-right">{fmtPct(r.short_float)}</td>
                   <td className="px-2 py-2 text-tape-faint text-right">{fmtPct(r.inst_own)}</td>
-                  <td className="px-2 py-2 text-tape-faint text-right">
-                    {r.beta == null ? "—" : r.beta.toFixed(2)}
-                  </td>
+                  <td className="px-2 py-2 text-tape-faint text-right">{fin(r.beta, 2)}</td>
                   <td className="px-2 py-2">
                     {r.signal ? (
                       <span
@@ -351,7 +355,7 @@ export default function UniversePage() {
                         }
                       >
                         {r.signal.direction === "bullish" ? "▲" : "▼"}{" "}
-                        {r.signal.confidence.toFixed(2)}
+                        {fin(r.signal.confidence, 2)}
                       </span>
                     ) : (
                       <span className="text-tape-dim">—</span>

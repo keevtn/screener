@@ -106,8 +106,8 @@ export function streakPhrase(s: PremarketStreak | undefined): string | null {
   return `${ord(s.count)} straight ${word}`;
 }
 
-/** Signed percent from a fraction, honest "--" for null. */
+/** Signed percent from a fraction, honest "--" for a non-number. */
 export function pctStr(v: number | null | undefined): string {
-  if (v == null) return "--";
+  if (typeof v !== "number" || !Number.isFinite(v)) return "--";
   return `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%`;
 }
