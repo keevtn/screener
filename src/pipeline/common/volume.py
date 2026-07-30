@@ -90,6 +90,53 @@ def mount_path_confirms(db_dir: str) -> bool:
     return under and os.access(mp, os.W_OK)
 
 
+def _sqlite_file(db_url: str) -> str | None:
+    """Absolute path to the SQLite file for a ``sqlite://`` URL, else None."""
+    if not db_url.startswith("sqlite:"):
+        return None
+    prefix = "sqlite:///"
+    path = db_url[len(prefix):] if db_url.startswith(prefix) else db_url[len("sqlite:"):]
+    if path in ("", ":memory:") or path.startswith(":memory:"):
+        return None
+    return os.path.abspath(path)
+
+
+# The slim seed deliberately EXCLUDES the bulk news archive, so raw_items /
+# clusters aren't shipped in it — a freshly-hydrated (ephemeral) DB has them
+# EMPTY, while a persistent volume accumulates thousands. This many rows in one of
+# them is therefore positive, env-independent proof of live accumulation on THIS
+# database = the persistent volume. (Kept well above any handful an ephemeral
+# container might ingest during a brief cutover boot, and well below the
+# hundreds/thousands a real volume carries.)
+_SEED_EXCLUDED_TABLES = ("raw_items", "clusters")
+_ACCUMULATION_THRESHOLD = 200
+
+
+def data_beyond_seed(db_url: str, threshold: int = _ACCUMULATION_THRESHOLD) -> bool:
+    """True if the live DB carries live-accumulated data the shipped seed never
+    contained (a non-trivial raw_items/clusters count). Read-only; fail-soft to
+    False (then other proofs decide)."""
+    import sqlite3
+
+    live = _sqlite_file(db_url)
+    if not live or not os.path.exists(live):
+        return False
+    try:
+        con = sqlite3.connect(f"file:{live}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        best = 0
+        for t in _SEED_EXCLUDED_TABLES:
+            try:
+                best = max(best, con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0])
+            except sqlite3.Error:
+                continue  # table absent on an older schema — skip
+        return best >= threshold
+    finally:
+        con.close()
+
+
 def volume_status(db_url: str | None = None) -> dict[str, Any]:
     """Assess whether the DB is on a persistent volume. ``ok`` is the trade/write
     gate; ``persistent`` is the raw filesystem verdict."""
@@ -106,20 +153,26 @@ def volume_status(db_url: str | None = None) -> dict[str, Any]:
             "on_railway": railway,
             "db_dir": None,
             "confirmed": True,
+            "beyond_seed": False,
             "mount_confirmed": False,
             "persistent": True,
             "railway_volume_path": os.environ.get("RAILWAY_VOLUME_MOUNT_PATH"),
             "reason": "non-sqlite/in-memory backend (not filesystem-bound)",
         }
-    # Two independent positive proofs; EITHER confirms persistence:
-    #   1. mount_path_confirms — RAILWAY_VOLUME_MOUNT_PATH set + DB under it +
-    #      writable (primary; robust to a volume that shares the root device).
-    #   2. is_persistent_mount — DB on a different device than '/' (secondary).
+    # Three independent positive proofs; ANY confirms persistence:
+    #   1. data_beyond_seed — the DB carries live-accumulated rows the slim seed
+    #      never shipped (raw_items/clusters). Env- and filesystem-independent, and
+    #      the most reliable in practice: a just-hydrated ephemeral DB has none.
+    #   2. mount_path_confirms — RAILWAY_VOLUME_MOUNT_PATH set + DB under it + writable.
+    #   3. is_persistent_mount — DB on a different device than '/'.
+    beyond_seed = data_beyond_seed(db_url)
     mount_ok = mount_path_confirms(dbdir)
     persistent = is_persistent_mount(dbdir)
-    confirmed = mount_ok or persistent
+    confirmed = beyond_seed or mount_ok or persistent
     ok = confirmed or not railway
-    if mount_ok:
+    if beyond_seed:
+        reason = f"volume confirmed: {dbdir} has live-accumulated data beyond the seed"
+    elif mount_ok:
         reason = f"volume confirmed: {dbdir} under RAILWAY_VOLUME_MOUNT_PATH (writable)"
     elif persistent:
         reason = f"volume confirmed: {dbdir} on a separate device from /"
@@ -127,14 +180,15 @@ def volume_status(db_url: str | None = None) -> dict[str, Any]:
         reason = f"not on Railway; {dbdir} shares the root device (local/CI — allowed)"
     else:
         reason = (
-            f"EPHEMERAL: {dbdir} is not under a mounted volume (no RAILWAY_VOLUME_MOUNT_PATH "
-            "match, same device as /) — writes here will NOT persist"
+            f"EPHEMERAL: {dbdir} has no data beyond the seed, no RAILWAY_VOLUME_MOUNT_PATH "
+            "match, and shares the device with / — writes here will NOT persist"
         )
     return {
         "ok": ok,
         "on_railway": railway,
         "db_dir": dbdir,
         "confirmed": confirmed,
+        "beyond_seed": beyond_seed,
         "mount_confirmed": mount_ok,
         "persistent": persistent,
         "railway_volume_path": os.environ.get("RAILWAY_VOLUME_MOUNT_PATH"),

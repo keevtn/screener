@@ -20,10 +20,11 @@ def _set_railway(monkeypatch):
 
 
 def _both_false(monkeypatch):
-    # neither positive proof holds (control the two signals directly, so the tests
-    # are platform-independent — no reliance on real st_dev / os.access)
+    # no positive proof holds (control all three signals directly, so the tests
+    # are platform-independent — no reliance on real st_dev / os.access / a DB file)
     monkeypatch.setattr(volume, "is_persistent_mount", lambda p: False)
     monkeypatch.setattr(volume, "mount_path_confirms", lambda p: False)
+    monkeypatch.setattr(volume, "data_beyond_seed", lambda u, threshold=200: False)
 
 
 # --- sqlite_dir parsing -----------------------------------------------------
@@ -87,13 +88,54 @@ def test_railway_mount_path_confirms_despite_same_stdev(monkeypatch):
     assert st["mount_confirmed"] is True and st["persistent"] is False
 
 
+def test_railway_data_beyond_seed_confirms(monkeypatch):
+    # THE production fix: on the real Railway container neither mount-path nor
+    # st_dev proved persistence, but the DB carries live-accumulated data the seed
+    # never shipped -> confirmed, driver may trade.
+    _set_railway(monkeypatch)
+    monkeypatch.setattr(volume, "is_persistent_mount", lambda p: False)
+    monkeypatch.setattr(volume, "mount_path_confirms", lambda p: False)
+    monkeypatch.setattr(volume, "data_beyond_seed", lambda u, threshold=200: True)
+    st = volume.volume_status("sqlite:////data/pipeline.db")
+    assert st["ok"] is True and st["beyond_seed"] is True
+
+
 def test_railway_true_ephemeral_refused(monkeypatch):
-    # true cutover: neither proof holds -> still refuse (fail-closed preserved)
+    # true cutover: NO proof holds (empty just-hydrated DB) -> refuse (fail-closed)
     _set_railway(monkeypatch)
     _both_false(monkeypatch)
     st = volume.volume_status("sqlite:////data/pipeline.db")
     assert st["ok"] is False
     assert "EPHEMERAL" in st["reason"]
+
+
+def test_data_beyond_seed_counts_excluded_tables(tmp_path):
+    # a live-accumulated raw_items table (the seed ships none) proves persistence
+    import sqlite3
+
+    dbf = tmp_path / "live.db"
+    con = sqlite3.connect(dbf)
+    con.execute("CREATE TABLE raw_items (id TEXT)")
+    con.executemany("INSERT INTO raw_items VALUES (?)", [(str(i),) for i in range(250)])
+    con.commit()
+    con.close()
+    url = f"sqlite:///{dbf.as_posix()}"
+    assert volume.data_beyond_seed(url, threshold=200) is True     # 250 >= 200
+    assert volume.data_beyond_seed(url, threshold=500) is False    # 250 < 500
+    assert volume.data_beyond_seed("sqlite:///no/such/file.db") is False  # missing -> False
+
+
+def test_data_beyond_seed_empty_db_is_false(tmp_path):
+    # a just-hydrated ephemeral DB: schema exists but raw_items/clusters are empty
+    import sqlite3
+
+    dbf = tmp_path / "fresh.db"
+    con = sqlite3.connect(dbf)
+    con.execute("CREATE TABLE raw_items (id TEXT)")
+    con.execute("CREATE TABLE clusters (id TEXT)")
+    con.commit()
+    con.close()
+    assert volume.data_beyond_seed(f"sqlite:///{dbf.as_posix()}") is False
 
 
 def test_non_sqlite_backend_ok(monkeypatch):
