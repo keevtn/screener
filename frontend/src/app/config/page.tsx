@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import TapeNav, { useClock } from "@/components/tape/TapeNav";
 import HealthStrip from "@/components/tape/HealthStrip";
 import MiniMarkdown from "@/components/tape/MiniMarkdown";
+import TraderConfigs from "@/components/tape/TraderConfigs";
 import { fetchSpend, type Spend } from "@/lib/agents";
 import {
   approveProposal,
@@ -242,6 +243,9 @@ export default function ConfigPage() {
         </aside>
 
         <section className="flex-1 overflow-y-auto" tabIndex={0} aria-label="Configuration detail">
+          <div className="px-6 pt-4">
+            <TraderConfigs />
+          </div>
           {proposal ? (
             <ProposalDetail
               proposal={proposal}

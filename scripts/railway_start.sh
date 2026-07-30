@@ -47,6 +47,12 @@ python scripts/init_db.py
 echo "[boot] hydrate_seed (port demo history if the ledger is empty)"
 python scripts/hydrate_seed.py || echo "[boot] hydrate_seed failed; continuing (empty history)"
 
+# Assign the vol_stop A/B exit policies to the trader configs (idempotent +
+# walk-forward safe: only sets a config with no policy and no trades yet). Runs
+# regardless of TRADER_DRIVER_ENABLED — it only edits config rows, never trades.
+echo "[boot] assign_exit_policies (vol_stop A/B; idempotent)"
+python scripts/assign_exit_policies.py || echo "[boot] assign_exit_policies failed; continuing (configs keep horizon_hold)"
+
 (
   echo "[boot] fetch_model (quantized FinBERT ONNX; no-op unless SENTIMENT_MODE=onnx)"
   python scripts/fetch_model.py || echo "[boot] fetch_model failed; continuing (lexicon fallback)"

@@ -36,6 +36,7 @@ from pipeline.common.models import (
     SimConfig,
     SimTrade,
 )
+from pipeline.marketdata.vol import atr_fraction
 
 # Alpaca order statuses that represent real executed quantity we can pair.
 _FILLED_STATES = {"filled", "partially_filled"}
@@ -114,12 +115,17 @@ def portfolio_history_view(hist: dict[str, Any]) -> dict[str, Any]:
     points: list[dict[str, Any]] = []
     for i, t in enumerate(ts):
         e = eq[i] if i < len(eq) else None
-        if e is None:  # Alpaca emits null equity for pre-inception buckets
+        ev = _f(e)
+        # Skip pre-inception buckets: Alpaca reports equity as null OR 0.0 for the
+        # days before the account existed. On a fresh account a 1M/1Y window is
+        # mostly these zeros, and keeping them draws a fake 0 -> $10k jump. Real
+        # account equity is never 0, so <= 0 safely means "no account here yet".
+        if ev is None or ev <= 0:
             continue
         points.append(
             {
                 "t": int(t),
-                "equity": _f(e),
+                "equity": ev,
                 "pl": _f(pl[i]) if i < len(pl) else None,
                 "pl_pct": _f(plpct[i]) if i < len(plpct) else None,
             }
@@ -333,10 +339,16 @@ def _provenance_dict(
 ) -> dict[str, Any]:
     cluster = ctx.get(t.cluster_id or "") or {}
     feats = t.features_json or {}
+    # The exit policy that governed THIS trade — frozen in config_params at entry.
+    # Surfaces the vol_stop A/B in the blotter (and exit_reason distinguishes a
+    # vol_stop exit from a horizon/close exit on the closed row).
+    exit_policy = (feats.get("config_params") or {}).get("exit_policy") or {"kind": "horizon_hold"}
     return {
         "trade_id": t.trade_id,
         "config_id": t.config_id,
         "config_name": names.get(t.config_id),
+        "exit_policy": exit_policy.get("kind", "horizon_hold"),
+        "exit_reason": t.exit_reason,
         "entry_source": t.entry_source,
         "notional": feats.get("notional"),
         "cluster_id": t.cluster_id,
@@ -662,28 +674,6 @@ def snap_fills_to_bars(
         )
     out.sort(key=lambda m: m["bar_time"])
     return out
-
-
-def atr_fraction(daily_bars: list[dict[str, Any]], period: int = 14) -> float | None:
-    """Average True Range as a fraction of the last close, from cached DAILY bars
-    (oldest->newest, {high, low, close}). None when there isn't enough history.
-    This is the disclosed 'recent vol' input the advisory vol_stop is scaled by."""
-    if len(daily_bars) < 2:
-        return None
-    trs: list[float] = []
-    prev_close = float(daily_bars[0]["close"])
-    for b in daily_bars[1:]:
-        hi, lo, cl = float(b["high"]), float(b["low"]), float(b["close"])
-        trs.append(max(hi - lo, abs(hi - prev_close), abs(lo - prev_close)))
-        prev_close = cl
-    if not trs:
-        return None
-    window = trs[-period:]
-    atr = sum(window) / len(window)
-    last_close = float(daily_bars[-1]["close"])
-    if last_close <= 0:
-        return None
-    return atr / last_close
 
 
 def advisory_vol_stop(

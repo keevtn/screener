@@ -14,6 +14,8 @@ export interface Provenance {
   trade_id: string;
   config_id: string;
   config_name: string | null;
+  exit_policy?: string; // 'vol_stop' | 'horizon_hold' | ... (the A/B arm)
+  exit_reason?: string | null; // how it actually closed (vol_stop | horizon | close | ...)
   entry_source: string | null;
   notional: number | null;
   cluster_id: string | null;
@@ -405,6 +407,27 @@ export function fetchMarkers(ticker: string): Promise<MarkersResult> {
     ticker: ticker.toUpperCase(),
     markers: [],
   });
+}
+
+// --- sim configs (the vol_stop A/B) -----------------------------------------
+export interface SimConfigItem {
+  config_id: string;
+  name: string;
+  enabled: boolean;
+  gate_ref: string | null;
+  params: Record<string, unknown>;
+  exit_policy: { kind: string; ref?: string } | null;
+  notes: string | null;
+}
+
+export interface SimConfigsResult {
+  reachable: boolean;
+  count: number;
+  items: SimConfigItem[];
+}
+
+export function fetchSimConfigs(): Promise<SimConfigsResult> {
+  return getJson<SimConfigsResult>("/sim/configs", { reachable: false, count: 0, items: [] });
 }
 
 // --- standing driver liveness (read-only) -----------------------------------

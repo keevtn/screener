@@ -52,6 +52,10 @@ from pipeline.sim.engine import run_sim_cycle
 log = logging.getLogger("pipeline.sim.driver")
 
 DEFAULT_SWEEP_INTERVAL_S = 60.0
+# While the market is closed the driver still re-checks the clock (and beats) on
+# this cadence, so the heartbeat stays fresher than the API's staleness window —
+# /trader/driver can then show "armed, waiting for open" rather than going stale.
+HEARTBEAT_IDLE_S = 60.0
 
 
 def driver_enabled() -> bool:
@@ -221,6 +225,7 @@ def run_session(
     host: str,
     pid: int,
     started_at: datetime,
+    atr_fn: Callable[[str], float | None] | None = None,
     sleep: Callable[[float], Any] = time.sleep,
     now_fn: Callable[[], datetime] = utcnow,
     sweep_interval_s: float = DEFAULT_SWEEP_INTERVAL_S,
@@ -247,7 +252,7 @@ def run_session(
         now = now_fn()
         force = now >= flatten_at
         with session_factory() as s:
-            run_sim_cycle(s, quote, now=now, broker=broker, force_exit=force)
+            run_sim_cycle(s, quote, now=now, broker=broker, force_exit=force, atr_fn=atr_fn)
             write_heartbeat(
                 s, driver_id=driver_id, host=host, pid=pid, started_at=started_at,
                 now=now, sweeps=sweeps, note=("flatten" if force else "sweep"),
@@ -285,6 +290,7 @@ def run_trader_driver(
     and the account passes assert_paper_ready (ACTIVE, unblocked, buying power)."""
     from pipeline.marketdata.alpaca import AlpacaData, alpaca_configured
     from pipeline.marketdata.paper_account import PaperAccountReader
+    from pipeline.marketdata.vol import atr_fraction
     from pipeline.sim.broker import AlpacaPaperBroker
 
     if not alpaca_configured():
@@ -310,16 +316,45 @@ def run_trader_driver(
         tr = data.latest_trade(t)
         return tr.get("price") if tr else None
 
+    def atr_fn(t: str) -> float | None:
+        # Recent daily ATR fraction — the frozen vol input for vol_stop configs,
+        # snapshotted at entry. Fail-soft to None (vol_stop then falls back to the
+        # horizon backstop).
+        return atr_fraction(data.daily_bars(t))
+
+    # --- liveness: beat on boot + every idle tick, not just per in-session sweep,
+    # so /trader/driver distinguishes "flag unset" ({present:false}) from "armed,
+    # waiting for the open" (present, alive, note=idle). Idle ticks are capped so
+    # the beat stays fresher than the API's staleness threshold.
+    beat_ticks = {"n": 0}
+
+    def _beat(note: str) -> None:
+        try:
+            with Session(engine, expire_on_commit=False) as s:
+                write_heartbeat(
+                    s, driver_id=driver_id, host=host, pid=pid, started_at=started_at,
+                    now=now_fn(), sweeps=beat_ticks["n"], note=note,
+                    session_date=None, stale_after_s=stale_after,
+                )
+        except Exception:  # noqa: BLE001 — a heartbeat write must never crash the loop
+            log.warning("heartbeat write failed", exc_info=True)
+
+    _beat("boot")  # immediate, before the first (possibly slow) clock fetch
+
     def clock_fn() -> dict[str, Any] | None:
-        return data.clock()  # parsed aware datetimes (ET-offset ISO) or None
+        c = data.clock()
+        beat_ticks["n"] += 1
+        # 'idle' beat each tick; a session takes over with 'sweep'/'flatten' beats.
+        _beat("idle" if (c and not c.get("is_open")) else "armed")
+        return c
 
     def session_fn(flatten_at: datetime | None, clock: dict[str, Any]) -> Any:
         return run_session(
             flatten_at, clock,
             session_factory=lambda: Session(engine, expire_on_commit=False),
             reader=reader, broker=broker, quote=quote, driver_id=driver_id,
-            host=host, pid=pid, started_at=started_at, sleep=sleep, now_fn=now_fn,
-            sweep_interval_s=interval, stale_after_s=stale_after,
+            host=host, pid=pid, started_at=started_at, atr_fn=atr_fn,
+            sleep=sleep, now_fn=now_fn, sweep_interval_s=interval, stale_after_s=stale_after,
         )
 
     def summary_fn(session_date: Any, clock: dict[str, Any]) -> Any:
@@ -335,5 +370,9 @@ def run_trader_driver(
         summary_fn=summary_fn,
         sleep=sleep,
         begin_run=broker.begin_run,
+        # Cap the idle sleep so the driver re-checks the clock and beats well within
+        # the API's staleness window while the market is closed.
+        idle_cap_s=HEARTBEAT_IDLE_S,
+        retry_s=HEARTBEAT_IDLE_S,
         max_iters=max_iters,
     )

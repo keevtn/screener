@@ -272,6 +272,7 @@ def evaluate_entries(
     now: datetime | None = None,
     broker: Any = None,
     day_start_utc: datetime | None = None,
+    atr_fn: QuoteFn | None = None,
 ) -> list[SimTrade]:
     """Open trades for enabled configs against fresh scored clusters.
 
@@ -338,7 +339,7 @@ def evaluate_entries(
             if px is None or px <= 0:
                 continue  # no quote -> no trade; fills are never fabricated
 
-            trade = _open_trade(cfg, feat, dirn, float(px), now, broker)
+            trade = _open_trade(cfg, feat, dirn, float(px), now, broker, atr_fn=atr_fn)
             if trade is None:
                 continue  # broker: order not filled -> no position (no-fill == no-trade)
             session.add(trade)
@@ -356,10 +357,20 @@ def evaluate_entries(
 
 
 def _open_trade(
-    cfg: SimConfig, feat: dict[str, Any], dirn: int, px: float, now: datetime, broker: Any
+    cfg: SimConfig,
+    feat: dict[str, Any],
+    dirn: int,
+    px: float,
+    now: datetime,
+    broker: Any,
+    atr_fn: QuoteFn | None = None,
 ) -> SimTrade | None:
     """Build one SimTrade. With a broker, place a real paper order and use the
-    reconciled fill as entry_price (None if it doesn't fill)."""
+    reconciled fill as entry_price (None if it doesn't fill). ``atr_fn`` supplies
+    the decision-time volatility (recent daily ATR fraction) snapshotted into
+    features_json so a vol_stop exit has a FROZEN vol input (lookahead hygiene,
+    same discipline as the rest of the feature snapshot). Only fetched for configs
+    whose exit policy actually needs it, and never fatal."""
     p = cfg.params_json or {}
     horizon = int(p.get("horizon_trading_days", 3))
     entry_price = px
@@ -367,6 +378,17 @@ def _open_trade(
     broker_name: str | None = None
     entry_order_id: str | None = None
     qty: int | None = None
+
+    # Snapshot recent volatility only when the frozen exit policy is vol_stop —
+    # no need to fetch bars for horizon-hold configs. Fail-soft to None (then the
+    # vol_stop falls back to the horizon backstop, documented in decide_exit).
+    atr_frac: float | None = None
+    policy = resolve_exit_policy(p, feat.get("catalyst_type"))
+    if atr_fn is not None and policy.get("kind") == "vol_stop":
+        try:
+            atr_frac = atr_fn(feat["ticker"])
+        except Exception:  # noqa: BLE001
+            atr_frac = None
 
     if broker is not None:
         if broker.open_position_count() >= broker.max_open:
@@ -397,7 +419,13 @@ def _open_trade(
         entry_price=entry_price,
         entry_source=entry_source,
         horizon_trading_days=horizon,
-        features_json=feat | {"config_params": p, "qty": qty, "notional": (broker.notional if broker else None)},
+        features_json=feat
+        | {
+            "config_params": p,
+            "qty": qty,
+            "notional": (broker.notional if broker else None),
+            "atr_frac": atr_frac,  # frozen vol input for a vol_stop exit (None otherwise)
+        },
         cluster_id=feat["cluster_id"],
         created_at=now,
         broker=broker_name,
@@ -462,6 +490,9 @@ def _should_exit(
             "horizon_reached": horizon_reached,
             "horizon_reason": horizon_reason,
             "held_hours": (now - t.entered_at).total_seconds() / 3600.0,
+            # Frozen at entry (features_json). vol_stop uses it; a missing/None
+            # value makes decide_exit fall back to the horizon backstop.
+            "atr_frac": feat.get("atr_frac"),
         },
     )
     return d.exit, d.reason
@@ -533,14 +564,20 @@ def run_sim_cycle(
     broker: Any = None,
     force_exit: bool = False,
     day_start_utc: datetime | None = None,
+    atr_fn: QuoteFn | None = None,
 ) -> str:
     """One sim pass (called from the pipeline's fast sweep when SIM_ENABLED, or
-    from the standalone mockup driver). ``force_exit`` flattens everything (EOD).
-    ``day_start_utc`` scopes the entry loss guards to the session (default: ET day)."""
+    from the standalone driver). ``force_exit`` flattens everything (EOD).
+    ``day_start_utc`` scopes the entry loss guards to the session (default: ET day).
+    ``atr_fn`` (ticker -> recent daily ATR fraction, or None) is snapshotted at
+    entry so vol_stop exits have their frozen volatility input; None keeps the
+    quote-only / horizon-hold behavior unchanged."""
     opened = (
         []
         if force_exit
-        else evaluate_entries(session, quote, now=now, broker=broker, day_start_utc=day_start_utc)
+        else evaluate_entries(
+            session, quote, now=now, broker=broker, day_start_utc=day_start_utc, atr_fn=atr_fn
+        )
     )
     closed = evaluate_exits(session, quote, now=now, broker=broker, force=force_exit)
     return f"opened={len(opened)} closed={len(closed)}"

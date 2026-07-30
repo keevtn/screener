@@ -141,6 +141,21 @@ class AlpacaData:
             params["page_token"] = token
         return out
 
+    def daily_bars(self, ticker: str, *, lookback_days: int = 45) -> list[dict[str, Any]]:
+        """Daily OHLC bars for the last ``lookback_days`` calendar days, oldest
+        first — the vol_stop exit's ATR source. Reuses the minute_bars pagination
+        with a 1Day timeframe. Empty list on any failure (fail-soft: no vol -> the
+        exit policy falls back to the horizon backstop)."""
+        try:
+            return self.minute_bars(
+                ticker,
+                start=utcnow() - timedelta(days=lookback_days),
+                timeframe="1Day",
+                feed="iex",
+            )
+        except Exception:  # noqa: BLE001 — vol is optional; never crash a sweep
+            return []
+
     def latest_trade(self, ticker: str) -> dict[str, Any] | None:
         """Most recent trade print {price, time} (IEX feed), or None."""
         try:

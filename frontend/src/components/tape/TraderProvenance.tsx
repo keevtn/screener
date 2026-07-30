@@ -23,6 +23,14 @@ export default function TraderProvenance({ prov }: { prov: Provenance | null }) 
             {prov.config_name}
           </span>
         )}
+        {prov.exit_policy && prov.exit_policy !== "horizon_hold" && (
+          <span
+            className="text-[9px] font-semibold uppercase tracking-[0.06em] text-tape-warn border border-tape-border rounded px-1 py-px"
+            title={`exit policy: ${prov.exit_policy}${prov.exit_reason ? ` · exited: ${prov.exit_reason}` : ""}`}
+          >
+            {prov.exit_policy}
+          </span>
+        )}
         {prov.catalyst_type && (
           <span
             className={`text-[9px] font-semibold uppercase tracking-[0.06em] rounded px-1 py-px border ${

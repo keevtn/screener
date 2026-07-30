@@ -113,18 +113,21 @@ def test_account_view_day_pl():
     assert v["clock"]["is_open"] is True
 
 
-def test_portfolio_history_skips_null_equity():
+def test_portfolio_history_skips_null_and_preinception_zero_equity():
+    # A fresh account: pre-inception buckets come back null OR 0.0 and must be
+    # dropped so the curve doesn't draw a fake 0 -> $10k jump.
     hist = {
-        "timestamp": [1, 2, 3],
-        "equity": [None, 10000, 10100],
-        "profit_loss": [None, 0, 100],
-        "profit_loss_pct": [None, 0, 0.01],
+        "timestamp": [1, 2, 3, 4, 5],
+        "equity": [None, 0.0, 0, 10000, 10100],
+        "profit_loss": [None, 0, 0, 0, 100],
+        "profit_loss_pct": [None, 0, 0, 0, 0.01],
         "base_value": 10000,
         "timeframe": "1D",
     }
     v = trader.portfolio_history_view(hist)
     assert len(v["points"]) == 2
     assert v["points"][0]["equity"] == 10000.0
+    assert v["points"][1]["equity"] == 10100.0
 
 
 # --------------------------------------------------------------------------- #
