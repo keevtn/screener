@@ -71,6 +71,7 @@ from pipeline.grade.metrics import metrics_by_config
 from pipeline.lab.analysis import car_curves, load_lab_rows, quintile_spread, spearman_ic
 from pipeline.marketdata import MarketDataProvider
 from pipeline.marketdata.alpaca import AlpacaData, alpaca_configured
+from pipeline.marketdata.paper_account import paper_reader
 from pipeline.panel import (
     compile_preset,
     fired_panel,
@@ -1003,6 +1004,91 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
                 for r in rows
             ],
         }
+
+    # --- TRADER view (Phase 1): read-only paper account, positions, blotter ---
+    # Strictly read-only toward Alpaca (GET account/positions/orders/portfolio-
+    # history/clock only — no order placement/cancel anywhere). Keys never reach
+    # the browser; the PaperAccountReader fronts a ~10s TTL cache so many viewers
+    # collapse to one upstream call. No keys -> {configured:false} so the deployed
+    # site renders a "connect Alpaca keys" empty state instead of crashing.
+    from pipeline.api import trader as _trader
+
+    def _reader() -> Any:
+        return paper_reader()
+
+    @app.get("/trader/account")
+    def get_trader_account() -> dict[str, Any]:
+        """Portfolio header: equity, cash, buying power, day P&L + market clock."""
+        reader = _reader()
+        if reader is None:
+            return {"configured": False}
+        try:
+            return {"available": True, **_trader.account_view(reader.account(), reader.clock())}
+        except Exception:  # noqa: BLE001 — vendor hiccup must not 500 the header
+            log.warning("trader account fetch failed", exc_info=True)
+            return {"configured": True, "available": False}
+
+    @app.get("/trader/portfolio/history")
+    def get_trader_portfolio_history(
+        period: str = Query("1M"),
+        timeframe: str = Query("1D"),
+        extended_hours: bool = Query(True),
+    ) -> dict[str, Any]:
+        """Equity curve from Alpaca's portfolio/history endpoint. ``period`` e.g.
+        1D/1W/1M/3M/1A/all; ``timeframe`` e.g. 1Min/5Min/15Min/1H/1D."""
+        reader = _reader()
+        if reader is None:
+            return {"configured": False, "points": []}
+        try:
+            hist = reader.portfolio_history(
+                period=period, timeframe=timeframe, extended_hours=extended_hours
+            )
+            return {"available": True, **_trader.portfolio_history_view(hist)}
+        except Exception:  # noqa: BLE001
+            log.warning("trader portfolio history fetch failed", exc_info=True)
+            return {"configured": True, "available": False, "points": []}
+
+    @app.get("/trader/positions")
+    def get_trader_positions(session: Session = Depends(get_session)) -> dict[str, Any]:
+        """Open positions with unrealized P&L + provenance (config + catalyst)."""
+        reader = _reader()
+        if reader is None:
+            return {"configured": False, "count": 0, "items": []}
+        try:
+            return {"available": True, **_trader.positions_view(reader.positions(), session)}
+        except Exception:  # noqa: BLE001
+            log.warning("trader positions fetch failed", exc_info=True)
+            return {"configured": True, "available": False, "count": 0, "items": []}
+
+    @app.get("/trader/blotter")
+    def get_trader_blotter(
+        session: Session = Depends(get_session),
+        scope: str = Query("closed"),
+        config_id: str | None = None,
+        today_et: str | None = None,
+        limit: int = Query(500, ge=1, le=500),
+    ) -> dict[str, Any]:
+        """Trade blotter: fills grouped into round-trips (entry->exit) with realized
+        P&L, each joined back to sim_trades for config + catalyst-headline
+        provenance. scope=closed|open|today|all; filter by config_id."""
+        if scope not in ("closed", "open", "today", "all"):
+            raise HTTPException(status_code=422, detail="scope must be closed|open|today|all")
+        reader = _reader()
+        if reader is None:
+            return {"configured": False, "scope": scope, "count": 0, "items": []}
+        try:
+            orders = [] if scope == "open" else reader.orders(status="all", limit=limit)
+            positions = reader.positions() if scope == "open" else []
+            return {
+                "available": True,
+                **_trader.blotter_view(
+                    orders, positions, session,
+                    scope=scope, config_id=config_id, today_et=today_et,
+                ),
+            }
+        except Exception:  # noqa: BLE001
+            log.warning("trader blotter fetch failed", exc_info=True)
+            return {"configured": True, "available": False, "scope": scope, "count": 0, "items": []}
 
     @app.get("/tickers/{ticker}/sim/bars")
     def get_sim_bars(ticker: str, hours: int = Query(24, ge=1, le=168)) -> dict[str, Any]:

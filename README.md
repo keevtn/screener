@@ -113,6 +113,13 @@ frontend is a standalone Next.js service.
    on the volume). Add any optional keys from
    [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) (`ANTHROPIC_API_KEY`, `ALPACA_*`, …).
    `PORT`/`HOST` are injected automatically.
+   - **TRADER view (paper account):** set `ALPACA_API_KEY` and `ALPACA_API_SECRET`
+     (names only — paste your **paper** account values in the Railway UI, never in
+     git) on **this app service**. They power the read-only `/trader/*` endpoints
+     (account, positions, portfolio history, blotter) as well as the price-bar /
+     sim paths. Without them the deployed TRADER tab renders a "connect Alpaca
+     keys" empty state instead of crashing. All Alpaca access is paper-only and
+     read-only in the web backend; keys never reach the browser.
 5. Deploy. On boot the start script runs `init_db`, **hydrates the demo history**
    from the committed seed if the volume is empty
    ([`scripts/hydrate_seed.py`](scripts/hydrate_seed.py)), then in the background

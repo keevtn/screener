@@ -51,7 +51,7 @@ RANK / deep-dive panels.
 
 | Var | Default | Notes |
 |-----|---------|-------|
-| `ALPACA_API_KEY` / `ALPACA_API_SECRET` | — | Price bars + paper-trading sim. Absent → sim/live quotes inert; news + screener still work. |
+| `ALPACA_API_KEY` / `ALPACA_API_SECRET` | — | Price bars + paper-trading sim + the read-only **TRADER** dashboard (`/trader/*`). **PAPER account keys only.** The web backend is strictly read-only toward Alpaca (account/positions/orders/portfolio-history/clock — no order placement/cancel); order placement stays with the local driver + human gate. Absent → sim/live quotes inert and the TRADER tab shows a "connect Alpaca keys" empty state; news + screener still work. Keys never reach the browser (all calls proxied by the API behind a ~10s cache). |
 | `SIM_ENABLED` | `false` | Arm the paper-trading simulation loop. |
 | `FINVIZ_AUTH_TOKEN` | — | Primary universe/fundamentals provider; absent → free Nasdaq directory fallback. |
 

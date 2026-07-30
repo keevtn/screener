@@ -19,6 +19,7 @@ export type TapeSection =
   | "CATALYSTS"
   | "RANK"
   | "LEDGER"
+  | "TRADER"
   | "EVAL"
   | "CONFIG";
 
@@ -29,6 +30,7 @@ const NAV: { label: TapeSection; href: string | null }[] = [
   { label: "CATALYSTS", href: "/catalysts" },
   { label: "RANK", href: "/rank" },
   { label: "LEDGER", href: "/ledger" },
+  { label: "TRADER", href: "/trader" },
   { label: "EVAL", href: "/eval" },
   { label: "CONFIG", href: "/config" },
 ];
