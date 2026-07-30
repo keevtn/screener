@@ -25,6 +25,10 @@ def _both_false(monkeypatch):
     monkeypatch.setattr(volume, "is_persistent_mount", lambda p: False)
     monkeypatch.setattr(volume, "mount_path_confirms", lambda p: False)
     monkeypatch.setattr(volume, "data_beyond_seed", lambda u, threshold=200: False)
+    # Ensure the guard is ENABLED: a script's import-time load_dotenv() can leak a
+    # developer's .env TRADER_VOLUME_GUARD=off (the kill switch) into the pytest
+    # process, which would bypass the guard and defeat the refusal assertions.
+    monkeypatch.delenv("TRADER_VOLUME_GUARD", raising=False)
 
 
 # --- sqlite_dir parsing -----------------------------------------------------

@@ -8,6 +8,7 @@ run on the zero-dependency L-M lexicon + a fake FinBERT (no torch in CI).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -18,6 +19,26 @@ from typing import Any, Protocol
 _BACKEND = Path(__file__).resolve().parents[3] / "backend"
 
 log = logging.getLogger("pipeline.score.sentiment")
+
+
+def finbert_status_path() -> Path:
+    """Where resolve_finbert records its outcome so the read-only API can surface
+    it (the pipeline scores; the API doesn't — this bridges them without logs)."""
+    return Path(os.environ.get("FINBERT_STATUS_PATH", "data/finbert_status.json"))
+
+
+def _write_finbert_status(mode: str, active: bool, error: str | None, score: float | None) -> None:
+    """Persist the FinBERT resolve outcome (best-effort; never raises)."""
+    try:
+        p = finbert_status_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps(
+                {"mode": mode, "active": active, "error": error, "probe_score": score}
+            )
+        )
+    except Exception:  # noqa: BLE001 — observability only, never break scoring
+        pass
 
 
 class _Analyzer(Protocol):
@@ -80,18 +101,35 @@ def resolve_finbert() -> _Analyzer | None:
     """
     mode = os.environ.get("SENTIMENT_MODE", "lexicon").strip().lower()
     if mode in ("", "lexicon", "lm", "none", "off"):
+        _write_finbert_status(mode, active=False, error=None, score=None)
         return None
     if mode in ("onnx", "onnx-int8", "quantized"):
         try:
             from pipeline.score.onnx_sentiment import OnnxFinbertAnalyzer
 
             analyzer = OnnxFinbertAnalyzer()
-            log.info("sentiment: ONNX int8 FinBERT active")
+            # SELF-TEST: run one real inference at construction. Loading the ONNX
+            # session can succeed while inference fails at RUNTIME on a given
+            # box (Linux onnxruntime op/threading/memory issues the Windows dev
+            # box never hits) — and an inference that throws mid-sweep crashes the
+            # ENTIRE score step, producing ZERO cluster_scores (observed on Railway
+            # 2026-07-30: onnx mode -> clusters grew but cluster_scores stayed 0,
+            # while lexicon mode scored fine). Catching it here degrades to LM so
+            # scoring keeps writing cluster_scores, and logs the exact error so the
+            # real onnx failure is visible instead of a silently-dead pipeline.
+            probe = analyzer.analyze_text_batch([("probe", "the market rallied on strong earnings")])
+            if not probe or probe[0].score is None:
+                raise RuntimeError("ONNX self-test produced no score")
+            log.info("sentiment: ONNX int8 FinBERT active (self-test ok, score=%.4f)", probe[0].score)
+            _write_finbert_status(mode, active=True, error=None, score=float(probe[0].score))
             return analyzer
         except Exception as exc:  # noqa: BLE001 — degrade, never crash the pipeline
             log.warning(
-                "SENTIMENT_MODE=%s but ONNX FinBERT unavailable (%s); scoring LM-only", mode, exc
+                "SENTIMENT_MODE=%s but ONNX FinBERT unavailable at construct OR self-test "
+                "inference (%r); scoring LM-only (cluster_scores still written, finbert_score null)",
+                mode, exc,
             )
+            _write_finbert_status(mode, active=False, error=f"{type(exc).__name__}: {exc}"[:400], score=None)
             return None
     if mode in ("finbert", "torch", "transformers"):
         try:

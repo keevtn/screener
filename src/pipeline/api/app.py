@@ -1311,12 +1311,27 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
         _recent = session.execute(
             select(_CS.finbert_score).order_by(_CS.created_at.desc()).limit(200)
         ).scalars().all()
+        # The pipeline records its FinBERT resolve outcome (active / the exact error
+        # if onnx construct-or-inference failed and it degraded to LM) — surfaced
+        # here so the failure is checkable without Railway log access.
+        _resolve: dict[str, Any] | None = None
+        try:
+            from pipeline.score.sentiment import finbert_status_path
+
+            _sp = finbert_status_path()
+            if _sp.exists():
+                import json as _json
+
+                _resolve = _json.loads(_sp.read_text())
+        except Exception:  # noqa: BLE001
+            _resolve = None
         scoring = {
             "sentiment_mode": _os.environ.get("SENTIMENT_MODE", "lexicon"),
             "finbert_url_set": bool(_os.environ.get("FINBERT_ONNX_URL")),
             "finbert_model_present": _Path(_model_path).exists(),
             "cluster_scores_recent": len(_recent),
             "finbert_scores_recent": sum(1 for s in _recent if s is not None),
+            "finbert_resolve": _resolve,  # {mode, active, error, probe_score} or null
         }
 
         return HealthOut(
