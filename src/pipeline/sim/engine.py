@@ -309,6 +309,16 @@ def evaluate_entries(
     fresh = _fresh_scored_clusters(session, now - timedelta(minutes=_ENTRY_LOOKBACK_MIN))
     opened: list[SimTrade] = []
     capped: list[str] = []
+    # Per-reason skip tally so a sweep that opens nothing is NEVER a silent mystery
+    # (this is how the 2026-07-30 "cloud scores materiality 0.6 but finbert_score is
+    # None under lexicon mode, so finbert_sign never resolves a direction" bug hid).
+    skips: dict[str, int] = {}
+    matched_filter = 0  # config×cluster pairs that passed _cluster_matches
+    no_dir_finbert_none = 0  # of the no-direction skips, how many were a null finbert_score
+
+    def _skip(reason: str) -> None:
+        skips[reason] = skips.get(reason, 0) + 1
+
     for cfg in configs:
         # (a) Per-config daily loss cap — halt this config's entries this session.
         if cfg_cap > 0 and per_pnl.get(cfg.config_id, 0.0) <= -cfg_cap:
@@ -317,9 +327,14 @@ def evaluate_entries(
         p = cfg.params_json or {}
         for feat in fresh:
             if not _cluster_matches(p, feat):
+                _skip("filter")
                 continue
+            matched_filter += 1
             dirn = _direction(p, feat)
             if dirn is None:
+                _skip("no_direction")
+                if p.get("direction", "finbert_sign") == "finbert_sign" and feat.get("finbert_score") is None:
+                    no_dir_finbert_none += 1
                 continue
             ticker = feat["ticker"]
             # one open position per (config, ticker); 24h re-entry cooldown
@@ -334,14 +349,17 @@ def evaluate_entries(
                 recent.status == "open"
                 or (now - recent.entered_at) < timedelta(hours=_REENTRY_COOLDOWN_H)
             ):
+                _skip("cooldown_or_open")
                 continue
             px = quote(ticker)
             if px is None or px <= 0:
-                continue  # no quote -> no trade; fills are never fabricated
+                _skip("no_quote")  # no quote -> no trade; fills are never fabricated
+                continue
 
             trade = _open_trade(cfg, feat, dirn, float(px), now, broker, atr_fn=atr_fn)
             if trade is None:
-                continue  # broker: order not filled -> no position (no-fill == no-trade)
+                _skip("no_fill")  # broker: order not filled -> no position
+                continue
             session.add(trade)
             opened.append(trade)
     if capped:
@@ -350,6 +368,20 @@ def evaluate_entries(
             "(per-config day realized loss <= -$%.0f; exits unaffected)",
             sorted(capped), cfg_cap,
         )
+    # LOUD sweep summary: candidates seen and, when nothing opened, exactly why.
+    if fresh and (opened or skips):
+        log.info(
+            "evaluate_entries: %d enabled configs × %d fresh clusters -> opened=%d, "
+            "filter_matched=%d, skips=%s",
+            len(configs), len(fresh), len(opened), matched_filter, skips or {},
+        )
+        if not opened and no_dir_finbert_none:
+            log.warning(
+                "NO ENTRIES: %d filter-matched candidate(s) skipped for a NULL finbert_score "
+                "under direction=finbert_sign — the scorer isn't producing FinBERT sentiment "
+                "(SENTIMENT_MODE=lexicon?). finbert_sign configs cannot resolve a direction.",
+                no_dir_finbert_none,
+            )
     if opened:
         session.commit()
         publish_event("sim_trades", opened=len(opened))
