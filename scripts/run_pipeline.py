@@ -410,6 +410,23 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Loud, self-explaining volume banner (log-only — the pipeline is NOT blocked;
+    # phantom predictions on an ephemeral cutover DB are harmless, but this makes
+    # future flaps obvious in the logs instead of a mystery). The TRADER driver,
+    # which DOES place real orders, hard-refuses on the same signal.
+    from pipeline.common.volume import volume_status
+
+    _vs = volume_status(args.url)
+    if _vs["on_railway"] and not _vs["persistent"]:
+        log.warning(
+            "=== EPHEMERAL CONTAINER — NO PERSISTENT VOLUME === pipeline writes here "
+            "will NOT persist. %s (RAILWAY_VOLUME_MOUNT_PATH=%r). Likely a deploy "
+            "cutover; the real container runs on the mounted volume.",
+            _vs["reason"], _vs["railway_volume_path"],
+        )
+    elif _vs["on_railway"]:
+        log.info("VOLUME OK (pipeline): %s", _vs["reason"])
+
     engine = make_engine(args.url)
     ensure_indexes(engine)  # backfill perf indexes onto a long-lived DB (idempotent)
     # Attention rollup sources: live DB + the legacy archive when present.

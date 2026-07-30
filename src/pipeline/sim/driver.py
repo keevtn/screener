@@ -288,10 +288,19 @@ def run_trader_driver(
     """Construct the paper broker + read clients (all paper-endpoint-asserted) and
     run the standing daily loop. Refuses to start unless Alpaca keys are present
     and the account passes assert_paper_ready (ACTIVE, unblocked, buying power)."""
+    from pipeline.common.volume import require_persistent_volume
     from pipeline.marketdata.alpaca import AlpacaData, alpaca_configured
     from pipeline.marketdata.paper_account import PaperAccountReader
     from pipeline.marketdata.vol import atr_fraction
     from pipeline.sim.broker import AlpacaPaperBroker
+
+    # CRITICAL, checked FIRST — before any Alpaca client is even constructed: a
+    # driver that can't positively confirm it's on the persistent volume must
+    # never trade. Otherwise a deploy-cutover ephemeral container (same env, same
+    # keys) would place REAL paper orders while writing sim_trades to a DB that
+    # evaporates — orphaned positions the volume container's heartbeat can't see.
+    if not require_persistent_volume(log, "TRADER driver"):
+        return None
 
     if not alpaca_configured():
         log.error("TRADER driver: Alpaca keys absent — refusing to start (set ALPACA_API_KEY/SECRET)")

@@ -37,6 +37,12 @@ export PYTHONPATH="$PWD/src:$PWD:${PYTHONPATH:-}"
 
 export HOST=0.0.0.0
 INTERVAL="${PIPELINE_INTERVAL:-300}"
+
+# Volume banner up front so a deploy-cutover ephemeral container (DB on the
+# overlay, not the mounted volume) is obvious in the logs from line one. This is
+# informational; the authoritative refusal lives in the TRADER driver, which will
+# not trade unless it can positively confirm the persistent volume.
+python -c "from pipeline.common.volume import volume_status as v; s=v(); print('[boot] VOLUME', 'OK' if s['persistent'] else ('EPHEMERAL' if s['on_railway'] else 'local'), '-', s['reason'])" || echo "[boot] volume banner failed (continuing)"
 # Scoring backend: lexicon (default, zero extra weight) | onnx (int8 FinBERT) |
 # torch. onnx additionally needs FINBERT_ONNX_URL set so fetch_model can pull it.
 export SENTIMENT_MODE="${SENTIMENT_MODE:-lexicon}"
