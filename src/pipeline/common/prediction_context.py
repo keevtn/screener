@@ -41,9 +41,14 @@ log = logging.getLogger("pipeline.prediction_context")
 _CTX_FIELDS = ("source_class", "headline", "url", "source", "cluster_id")
 
 
-def _origin_cluster_ids(evidence: dict[str, Any] | None) -> list[str]:
-    """The origin cluster ids a (non-baseline) prediction's evidence points at."""
-    if not evidence:
+def _origin_cluster_ids(evidence: Any) -> list[str]:
+    """The origin cluster ids a (non-baseline) prediction's evidence points at.
+
+    Defensive: evidence_json is JSON and *should* be a dict, but a single row that
+    somehow holds a list/scalar must not raise here — that would abort the whole
+    per-cycle backfill batch and silently starve every NEW prediction of context
+    (the 2026-07-30 live regression). A non-dict simply carries no origin."""
+    if not isinstance(evidence, dict):
         return []
     cids = evidence.get("cluster_ids")
     if isinstance(cids, list):
@@ -154,14 +159,23 @@ def compute_context_rows(session: Session, *, only_missing: bool = True) -> list
     directs: list[tuple[str, list[str]]] = []  # (pred_id, origin cluster ids)
     shadows: list[tuple[str, str | None]] = []  # (pred_id, shadowed pred id)
     all_cids: set[str] = set()
+    skipped = 0
     for pid, ev in preds:
-        cids = _origin_cluster_ids(ev)
-        if cids:
-            directs.append((pid, cids))
-            all_cids.update(cids)
-        else:
-            shadow = ev.get("shadows") if isinstance(ev, dict) else None
-            shadows.append((pid, shadow if isinstance(shadow, str) and shadow else None))
+        # One malformed row must never abort the batch (which would starve every
+        # other missing prediction of context, silently, every cycle).
+        try:
+            cids = _origin_cluster_ids(ev)
+            if cids:
+                directs.append((pid, cids))
+                all_cids.update(cids)
+            else:
+                shadow = ev.get("shadows") if isinstance(ev, dict) else None
+                shadows.append((pid, shadow if isinstance(shadow, str) and shadow else None))
+        except Exception:  # noqa: BLE001 — resilience: skip the bad row, keep going
+            skipped += 1
+            log.warning("prediction_context: skipping unresolvable evidence for %s", pid)
+    if skipped:
+        log.warning("prediction_context: %d prediction(s) had unusable evidence", skipped)
 
     origin = _cluster_origin_map(session, all_cids)
     now = utcnow()
@@ -190,12 +204,37 @@ def compute_context_rows(session: Session, *, only_missing: bool = True) -> list
 
 
 def backfill_prediction_context(session: Session, *, only_missing: bool = True) -> int:
-    """Insert context rows for predictions missing one; commit. Best-effort at the
-    call site — a resolution failure must never block prediction issuance, so the
-    caller wraps this. Returns the number of rows written."""
+    """Insert context rows for predictions missing one; commit. Returns rows written.
+
+    Resilient by design: the fast path is one bulk insert, but if that fails (a
+    single constraint/integrity issue on one row would otherwise abort the whole
+    batch and silently starve every new prediction of context), it falls back to
+    per-row inserts so the good rows still land and only the bad one is skipped and
+    logged."""
     rows = compute_context_rows(session, only_missing=only_missing)
     if not rows:
         return 0
-    session.bulk_insert_mappings(PredictionContext, rows)
-    session.commit()
-    return len(rows)
+    try:
+        session.bulk_insert_mappings(PredictionContext, rows)
+        session.commit()
+        return len(rows)
+    except Exception:  # noqa: BLE001 — degrade to per-row so one bad row can't block all
+        session.rollback()
+        log.warning(
+            "prediction_context: bulk insert of %d rows failed; retrying per-row",
+            len(rows),
+            exc_info=True,
+        )
+    written = 0
+    for r in rows:
+        try:
+            session.add(PredictionContext(**r))
+            session.commit()
+            written += 1
+        except Exception:  # noqa: BLE001 — skip the offending row, keep the rest
+            session.rollback()
+            log.warning(
+                "prediction_context: skipped row for %s", r.get("prediction_id"), exc_info=True
+            )
+    log.info("prediction_context: wrote %d/%d rows via per-row fallback", written, len(rows))
+    return written
