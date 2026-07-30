@@ -283,6 +283,100 @@ def test_markers_entry_then_exit(session):
     assert v["markers"][1]["date"] == "2026-07-20"
 
 
+# --------------------------------------------------------------------------- #
+# Follow-up: exact intraday fill markers (snap + alignment) + advisory levels
+# --------------------------------------------------------------------------- #
+def _bar(t, o, h, low, c):
+    return {"time": t, "open": o, "high": h, "low": low, "close": c, "volume": 1000}
+
+
+_BARS = [
+    _bar("2026-07-20T13:30:00Z", 100.0, 101.0, 99.5, 100.5),
+    _bar("2026-07-20T13:31:00Z", 100.5, 102.0, 100.0, 101.8),
+    _bar("2026-07-20T13:32:00Z", 101.8, 103.5, 101.5, 103.0),
+]
+
+
+def _mkfill(side, qty, price, t):
+    return {"symbol": "AAPL", "side": side, "qty": qty, "price": price, "time": t, "kind": "entry"}
+
+
+def test_snap_marker_lands_on_containing_bar_and_is_aligned():
+    # fill at 13:31:20, price 101.0 -> inside the 13:31 bar [100.0, 102.0]
+    fill = _mkfill("buy", 10, 101.0, "2026-07-20T13:31:20Z")
+    [m] = trader.snap_fills_to_bars([fill], _BARS)
+    assert m["bar_time"] == trader._epoch("2026-07-20T13:31:00Z")
+    assert m["in_bar"] is True
+    assert m["aligned"] is True
+    assert m["bar_low"] == 100.0 and m["bar_high"] == 102.0
+
+
+def test_snap_marker_flags_price_outside_bar_range():
+    # THE load-bearing check: a fill price that couldn't have printed in the bar
+    # it snapped to is flagged misaligned (would fail a rendered-marker assert).
+    fill = _mkfill("sell", 10, 150.0, "2026-07-20T13:31:20Z")  # 150 far above bar high 102
+    [m] = trader.snap_fills_to_bars([fill], _BARS)
+    assert m["aligned"] is False
+
+
+def test_snap_fill_before_window_is_dropped():
+    fill = _mkfill("buy", 5, 100.0, "2026-07-20T13:00:00Z")  # before first bar
+    assert trader.snap_fills_to_bars([fill], _BARS) == []
+
+
+def test_snap_across_gap_uses_preceding_bar():
+    # fill at 13:35 (no bar) snaps to the last bar <= it (13:32), flagged not in_bar
+    fill = _mkfill("sell", 10, 103.0, "2026-07-20T13:35:00Z")
+    [m] = trader.snap_fills_to_bars([fill], _BARS)
+    assert m["bar_time"] == trader._epoch("2026-07-20T13:32:00Z")
+    assert m["in_bar"] is False
+
+
+def test_every_wellformed_fill_marker_is_aligned():
+    # A fill inside each bar must render aligned — the assertion we run on every
+    # rendered marker (here across the whole synthetic grid).
+    fills = [
+        _mkfill("buy", 1, 100.2, "2026-07-20T13:30:30Z"),
+        _mkfill("buy", 1, 101.0, "2026-07-20T13:31:30Z"),
+        _mkfill("sell", 2, 102.5, "2026-07-20T13:32:30Z"),
+    ]
+    markers = trader.snap_fills_to_bars(fills, _BARS)
+    assert len(markers) == 3
+    for m in markers:
+        assert m["bar_low"] <= m["price"] <= m["bar_high"], f"misaligned: {m}"
+        assert m["aligned"] is True
+
+
+def test_atr_fraction_known_bars():
+    # constant true range of 2.0 on a 100 close -> atr_frac = 0.02
+    bars = [_bar(f"d{i}", 100, 101, 99, 100) for i in range(20)]
+    af = trader.atr_fraction(bars)
+    assert af == pytest.approx(0.02, abs=1e-6)
+
+
+def test_advisory_vol_stop_long_and_short():
+    # long: stop below entry; short: stop above entry
+    assert trader.advisory_vol_stop(100.0, 1, 0.02, atr_mult=2.0) == pytest.approx(96.0)
+    assert trader.advisory_vol_stop(100.0, -1, 0.02, atr_mult=2.0) == pytest.approx(104.0)
+
+
+def test_overlay_view_alignment_summary_and_intent(session):
+    orders = [
+        {"symbol": "AAPL", "side": "buy", "status": "filled", "filled_qty": "10",
+         "filled_avg_price": "101.0", "id": "o1", "filled_at": "2026-07-20T13:31:20Z"},
+    ]
+    positions = [{"symbol": "AAPL", "side": "long", "avg_entry_price": "101.0"}]
+    daily = [_bar(f"d{i}", 100, 101, 99, 100) for i in range(20)]
+    clock = {"next_close": "2026-07-20T20:00:00Z"}
+    v = trader.overlay_view("AAPL", orders, positions, _BARS, clock, session, daily, today_et="2026-07-20")
+    assert v["alignment"] == {"checked": 1, "aligned": 1, "misaligned": 0}
+    assert v["entry_lines"][0]["price"] == 101.0
+    assert v["advisory"][0]["kind"] == "vol_stop"
+    assert v["advisory"][0]["price"] == pytest.approx(101.0 * (1 - 2.0 * 0.02))
+    # flatten = close - 10min
+    assert v["flatten"]["time"] == trader._epoch("2026-07-20T20:00:00Z") - 600
+
+
 def test_day_view_report_card_prior_account_flag(session):
     from datetime import date
 

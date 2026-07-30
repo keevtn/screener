@@ -1150,8 +1150,8 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
     def get_trader_markers(
         ticker: str, session: Session = Depends(get_session)
     ) -> dict[str, Any]:
-        """Entry/exit fills for ONE ticker, for markers on the ticker candle chart.
-        Empty markers when unconfigured or the account never traded this name."""
+        """Entry/exit fills for ONE ticker, for markers on the ticker DAILY candle
+        chart (aligned by ET date). Empty when unconfigured or never traded."""
         reader = _reader()
         if reader is None:
             return {"configured": False, "ticker": ticker.upper(), "markers": []}
@@ -1161,6 +1161,50 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
         except Exception:  # noqa: BLE001
             log.warning("trader markers fetch failed", exc_info=True)
             return {"configured": True, "available": False, "ticker": ticker.upper(), "markers": []}
+
+    @app.get("/trader/overlay/{ticker}")
+    def get_trader_overlay(
+        ticker: str,
+        session: Session = Depends(get_session),
+        hours: int = Query(13, ge=1, le=168),
+        today_et: str | None = None,
+    ) -> dict[str, Any]:
+        """Live-chart overlay for ONE ticker (Phase-follow-up): EXACT intraday fill
+        markers snapped to the SAME 1-min bar grid /sim/bars serves (so alignment
+        is authoritative, not eyeballed) + the intent layer (entry price line,
+        flatten cutoff, signal-fired time, horizon-end, ADVISORY vol_stop). The
+        bar grid is AlpacaData.cached_minute_bars — the single source of truth the
+        live chart also renders — so marker epochs need no ET reshift."""
+        tk = ticker.upper()
+        empty = {
+            "ticker": tk,
+            "fill_markers": [],
+            "alignment": {"checked": 0, "aligned": 0, "misaligned": 0},
+            "entry_lines": [],
+            "advisory": [],
+            "flatten": None,
+            "signal": None,
+            "horizon": None,
+        }
+        reader = _reader()
+        if reader is None:
+            return {"configured": False, **empty}
+        try:
+            orders = reader.orders(status="all", limit=500)
+            positions = reader.positions()
+            clock = reader.clock()
+            # SAME source /sim/bars uses — one source of truth for the bar grid.
+            bars = AlpacaData().cached_minute_bars(tk, lookback_hours=hours) if alpaca_configured() else []
+            daily = price_provider.cached_bars(tk, days=60)
+            return {
+                "available": True,
+                **_trader.overlay_view(
+                    tk, orders, positions, bars, clock, session, daily, today_et=today_et
+                ),
+            }
+        except Exception:  # noqa: BLE001
+            log.warning("trader overlay fetch failed", exc_info=True)
+            return {"configured": True, "available": False, **empty}
 
     # --- TRADER watchlist lane (Phase 3): pinned tickers in OUR DB ------------
     # View/stage only. Pins live in our watchlist_pins table (not Alpaca's) so

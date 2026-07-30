@@ -8,6 +8,7 @@ import { attnSentiment } from "@/lib/buzz";
 import { fetchTickerClusters } from "@/lib/ticker";
 import { NEWS_EVENTS, PIPE_EVENTS, subscribeEvents, type TapeEvent } from "@/lib/events";
 import { watchLive, type QuoteMap } from "@/lib/live";
+import { fetchOverlay, type OverlayResult } from "@/lib/trader";
 import { isChunkError, reloadOnceForStaleChunk } from "@/lib/chunkGuard";
 import type { NewsItem } from "@/types/news";
 
@@ -112,6 +113,13 @@ export default function LiveUnifiedChart({ ticker, height = 380 }: { ticker: str
   const lastBarRef = useRef<{ time: number; open: number; high: number; low: number; close: number } | null>(null);
   const [state, setState] = useState<"loading" | "live" | "unavailable" | "failed">("loading");
   const [lastPush, setLastPush] = useState<string | null>(null);
+  // Overlay summary for the legend: our fills' alignment + any horizon note.
+  const [overlayInfo, setOverlayInfo] = useState<{
+    checked: number;
+    misaligned: number;
+    horizon: string | null;
+    advisory: string | null;
+  } | null>(null);
 
   // build + data effect
   useEffect(() => {
@@ -124,7 +132,22 @@ export default function LiveUnifiedChart({ ticker, height = 380 }: { ticker: str
     let sentimentSeries: ISeriesApi<"Line"> | null = null;
     let isentSeries: ISeriesApi<"Line"> | null = null;
     let candleTimes: number[] = [];
+    // The rendered bars' [low, high] by epoch — the frontend alignment re-check
+    // asserts each fill marker's price falls inside its bar (defense in depth on
+    // top of the server's authoritative check).
+    const candleRange = new Map<number, { low: number; high: number }>();
     let setMarkers: ((m: unknown[]) => void) | null = null;
+    // Two marker sources share one series overlay: catalyst pins + our fills/intent.
+    let catalystMarkers: { time: number }[] = [];
+    let overlayMarkers: { time: number }[] = [];
+    const renderMarkers = () => {
+      if (!setMarkers) return;
+      const all = [...catalystMarkers, ...overlayMarkers].sort((a, b) => a.time - b.time);
+      setMarkers(all as unknown[]);
+    };
+    // Price lines we own (entry / fill / advisory) — cleared before each redraw
+    // so a 60s refresh doesn't stack duplicates.
+    let ownPriceLines: unknown[] = [];
 
     async function loadFeatures() {
       const news = await fetchNewsForTicker(ticker, 500);
@@ -152,6 +175,8 @@ export default function LiveUnifiedChart({ ticker, height = 380 }: { ticker: str
       candlesRef.current?.setData(candles as never);
       lastBarRef.current = candles.at(-1) ?? null;
       candleTimes = candles.map((c) => c.time);
+      candleRange.clear();
+      for (const c of candles) candleRange.set(c.time, { low: c.low, high: c.high });
       setState("live");
     }
 
@@ -185,8 +210,114 @@ export default function LiveUnifiedChart({ ticker, height = 380 }: { ticker: str
           };
         })
         .filter(Boolean) as { time: number }[];
-      markers.sort((a, b) => a.time - b.time);
-      setMarkers(markers as unknown[]);
+      catalystMarkers = markers;
+      renderMarkers();
+    }
+
+    // Our own fills (snapped to the 1-min grid server-side) + the intent layer:
+    // entry price line, ADVISORY vol_stop, flatten cutoff, signal-fired time.
+    async function loadOverlay() {
+      if (!candlesRef.current) return;
+      const ov: OverlayResult = await fetchOverlay(ticker, 13);
+      if (disposed) return;
+      if (!ov.configured || (ov.fill_markers.length === 0 && ov.entry_lines.length === 0)) {
+        overlayMarkers = [];
+        renderMarkers();
+        setOverlayInfo(null);
+        return;
+      }
+
+      // Frontend re-check: assert each rendered fill marker's price sits inside
+      // the bar it snapped to (using the actually-rendered candle, not the
+      // server's copy). A mismatch is loud (console) and visually flagged WARN.
+      let feMisaligned = 0;
+      const fillMarks = ov.fill_markers.map((m) => {
+        const rng = candleRange.get(m.bar_time);
+        const localAligned = rng ? rng.low - 1e-4 <= m.price && m.price <= rng.high + 1e-4 : m.aligned;
+        if (!localAligned || !m.aligned) {
+          feMisaligned += 1;
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[trader] fill marker misaligned for ${ticker}: price ${m.price} outside bar ` +
+              `[${rng?.low ?? m.bar_low}, ${rng?.high ?? m.bar_high}] @ ${m.bar_time}`,
+          );
+        }
+        const buy = m.side === "buy";
+        const ok = localAligned && m.aligned;
+        return {
+          time: m.bar_time,
+          position: buy ? "belowBar" : "aboveBar",
+          shape: buy ? "arrowUp" : "arrowDown",
+          color: ok ? (buy ? UP : DOWN) : WARN,
+          text: `${m.kind === "entry" ? "IN" : "OUT"} ${m.qty}${ok ? "" : " ⚠"}`,
+        };
+      });
+
+      // Time-axis intent markers (flatten cutoff, signal-fired).
+      const timeMarks: { time: number }[] = [];
+      if (ov.flatten) {
+        timeMarks.push({
+          time: ov.flatten.time,
+          position: "aboveBar",
+          shape: "square",
+          color: MUTED,
+          text: "FLATTEN",
+        } as { time: number });
+      }
+      if (ov.signal) {
+        timeMarks.push({
+          time: ov.signal.time,
+          position: "belowBar",
+          shape: "circle",
+          color: ISENT,
+          text: "SIGNAL",
+        } as { time: number });
+      }
+      overlayMarkers = [...fillMarks, ...timeMarks] as { time: number }[];
+      renderMarkers();
+
+      // Price lines: clear ours, then draw entry (solid), each fill (dotted),
+      // advisory vol_stop (dashed, labeled ADVISORY).
+      const series = candlesRef.current;
+      for (const pl of ownPriceLines) {
+        try {
+          series.removePriceLine(pl as never);
+        } catch {
+          /* line may already be gone after a series rebuild */
+        }
+      }
+      ownPriceLines = [];
+      const addLine = (opts: Record<string, unknown>) => {
+        try {
+          ownPriceLines.push(series.createPriceLine(opts as never));
+        } catch {
+          /* ignore — cosmetic */
+        }
+      };
+      for (const e of ov.entry_lines) {
+        addLine({ price: e.price, color: MUTED, lineWidth: 1, lineStyle: 0, axisLabelVisible: true, title: e.label });
+      }
+      for (const m of ov.fill_markers) {
+        const buy = m.side === "buy";
+        addLine({
+          price: m.price,
+          color: buy ? UP : DOWN,
+          lineWidth: 1,
+          lineStyle: 1, // dotted
+          axisLabelVisible: false,
+          title: m.kind === "entry" ? "IN" : "OUT",
+        });
+      }
+      for (const a of ov.advisory) {
+        addLine({ price: a.price, color: WARN, lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: a.label });
+      }
+
+      setOverlayInfo({
+        checked: ov.alignment.checked,
+        misaligned: Math.max(ov.alignment.misaligned, feMisaligned),
+        horizon: ov.horizon?.beyond_today ? ov.horizon.label : null,
+        advisory: ov.advisory[0]?.label ?? null,
+      });
     }
 
     import("lightweight-charts")
@@ -288,9 +419,17 @@ export default function LiveUnifiedChart({ ticker, height = 380 }: { ticker: str
         loadBars().then(() => {
           chart.timeScale().fitContent();
           loadMarkers();
+          loadOverlay();
         });
         loadFeatures();
-        refreshTimer = setInterval(() => loadBars().then(loadMarkers), 60_000);
+        refreshTimer = setInterval(
+          () =>
+            loadBars().then(() => {
+              loadMarkers();
+              loadOverlay();
+            }),
+          60_000,
+        );
         onResize = () => {
           if (ref.current && chartRef.current) {
             chartRef.current.applyOptions({ width: ref.current.clientWidth });
@@ -395,6 +534,21 @@ export default function LiveUnifiedChart({ ticker, height = 380 }: { ticker: str
             <span style={{ color: MUTED }}>●</span> catalyst fired (bullish / bearish / neutral tone
             · <span className="text-tape-warn">!</span> = high alert)
           </span>
+          <span>
+            <span style={{ color: UP }}>▲</span>IN/<span style={{ color: DOWN }}>▼</span>OUT our fills
+            (snapped to bar; price line at fill) ·{" "}
+            <span style={{ color: MUTED }}>■</span>FLATTEN · <span style={{ color: ISENT }}>●</span>SIGNAL
+          </span>
+          {overlayInfo?.advisory && (
+            <span className="text-tape-warn">- - {overlayInfo.advisory} (nothing executes off this)</span>
+          )}
+          {overlayInfo?.horizon && <span className="text-tape-faint">{overlayInfo.horizon}</span>}
+          {overlayInfo && overlayInfo.checked > 0 && (
+            <span className={overlayInfo.misaligned > 0 ? "text-tape-warn" : "text-tape-bull"}>
+              fills aligned {overlayInfo.checked - overlayInfo.misaligned}/{overlayInfo.checked}
+              {overlayInfo.misaligned > 0 ? " ⚠ (see console)" : ""}
+            </span>
+          )}
           <span className="text-tape-dim">axis: ET</span>
         </div>
       )}

@@ -404,3 +404,65 @@ export function fetchMarkers(ticker: string): Promise<MarkersResult> {
     markers: [],
   });
 }
+
+// --- live-chart overlay (exact intraday fill markers + intent) --------------
+export interface OverlayFillMarker {
+  bar_time: number; // snapped 1-min bar start (UTC epoch) — where the marker draws
+  fill_time: number; // true fill epoch
+  in_bar: boolean; // false => snapped across a data gap
+  price: number;
+  side: string; // buy | sell
+  kind: string; // entry | exit
+  qty: number;
+  aligned: boolean; // fill price within the snapped bar's [low, high]
+  bar_low: number;
+  bar_high: number;
+}
+
+export interface OverlayEntryLine {
+  price: number;
+  side: string | null;
+  label: string;
+}
+
+export interface OverlayAdvisory {
+  price: number;
+  kind: string;
+  atr_frac: number;
+  atr_mult: number;
+  label: string;
+}
+
+export interface OverlayResult {
+  configured: boolean;
+  available: boolean;
+  reachable: boolean;
+  ticker: string;
+  fill_markers: OverlayFillMarker[];
+  alignment: { checked: number; aligned: number; misaligned: number };
+  entry_lines: OverlayEntryLine[];
+  advisory: OverlayAdvisory[];
+  flatten: { time: number; label: string } | null;
+  signal: { time: number; source: string; label: string } | null;
+  horizon: { end_date: string; beyond_today: boolean; label: string } | null;
+}
+
+export function fetchOverlay(ticker: string, hours = 13): Promise<OverlayResult> {
+  const p = new URLSearchParams({ hours: String(hours), today_et: etToday() });
+  return getJson<OverlayResult>(
+    `/trader/overlay/${encodeURIComponent(ticker.toUpperCase())}?${p}`,
+    {
+      configured: false,
+      available: false,
+      reachable: false,
+      ticker: ticker.toUpperCase(),
+      fill_markers: [],
+      alignment: { checked: 0, aligned: 0, misaligned: 0 },
+      entry_lines: [],
+      advisory: [],
+      flatten: null,
+      signal: null,
+      horizon: null,
+    },
+  );
+}

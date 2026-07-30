@@ -20,15 +20,17 @@ applied here (COST_RT lives in the sim ledger, a separate lane).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from pipeline.common.models import (
+    ArmedState,
     Cluster,
     ClusterScore,
+    Prediction,
     RawItem,
     SimConfig,
     SimTrade,
@@ -551,37 +553,265 @@ def _report_cards_for_date(
     return out
 
 
+def _fills_with_kind(fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Annotate each fill entry|exit via the signed-position walk the blotter uses:
+    a fill that moves |position| toward zero (at least partly) closes, so it reads
+    as an exit; otherwise it opens/adds and reads as an entry. Returns fills in
+    chronological order, each with a ``kind`` key added."""
+    ordered = sorted(fills, key=lambda f: (f.get("time") is None, str(f.get("time") or "")))
+    position = 0.0
+    out: list[dict[str, Any]] = []
+    for f in ordered:
+        signed = f["qty"] if f["side"] == "buy" else -f["qty"]
+        kind = "exit" if position != 0 and (position > 0) != (signed > 0) else "entry"
+        out.append({**f, "kind": kind})
+        position += signed
+    return out
+
+
 def markers_view(orders: list[dict[str, Any]], ticker: str, session: Session) -> dict[str, Any]:
-    """Entry/exit fills for ONE ticker, shaped for chart markers on the ticker
-    page's candle chart. Each marker: {time (epoch s), price, side (buy|sell),
-    kind (entry|exit), qty}. Kind is inferred by FIFO-pairing this ticker's fills
-    so a marker reads as opening or closing a position."""
+    """Entry/exit fills for ONE ticker, shaped for markers on the ticker page's
+    DAILY candle chart (aligned by ET date). Each marker: {time (epoch s), date
+    (ET), price, side, kind, qty}."""
     tk = ticker.upper()
     fills = [f for f in fills_from_orders(orders) if f["symbol"] == tk]
     if not fills:
         return {"configured": True, "ticker": tk, "markers": []}
-    # Re-derive entry/exit role via the same signed-FIFO logic the blotter uses.
-    ordered = sorted(fills, key=lambda f: (f.get("time") is None, str(f.get("time") or "")))
-    position = 0.0
     markers: list[dict[str, Any]] = []
-    for f in ordered:
-        signed = f["qty"] if f["side"] == "buy" else -f["qty"]
-        # A fill that moves |position| toward zero is (at least partly) an exit.
-        kind = "exit" if position != 0 and (position > 0) != (signed > 0) else "entry"
+    for f in _fills_with_kind(fills):
         markers.append(
             {
                 "time": _epoch(f.get("time")),
                 "date": _et_date(f.get("time")),  # ET trading date, for daily-chart alignment
                 "price": f["price"],
                 "side": f["side"],
-                "kind": kind,
+                "kind": f["kind"],
                 "qty": f["qty"],
             }
         )
-        position += signed
     markers = [m for m in markers if m["time"] is not None]
     markers.sort(key=lambda m: m["time"])
     return {"configured": True, "ticker": tk, "markers": markers}
+
+
+# --------------------------------------------------------------------------- #
+# Follow-up: EXACT intraday fill markers (snapped to the 1-min bar grid) +
+# intent overlay for the live 1-min chart. The live chart (LiveUnifiedChart via
+# /sim/bars) plots real UTC epochs and only FORMATS the axis in ET, so markers
+# align to the bar grid by UTC epoch — no ET reshift here. The snap uses the SAME
+# bar source /sim/bars serves (AlpacaData.cached_minute_bars), so there is one
+# source of truth for the grid, and the alignment assert is authoritative.
+# --------------------------------------------------------------------------- #
+def snap_fills_to_bars(
+    fills: list[dict[str, Any]], bars: list[dict[str, Any]], *, tol: float = 1e-4
+) -> list[dict[str, Any]]:
+    """Snap each fill to its containing 1-min bar and assert price alignment.
+
+    ``bars`` are the /sim/bars records ({time ISO-UTC, open, high, low, close}).
+    For each fill we find the bar with the greatest start <= the fill's epoch (the
+    containing minute, or the nearest preceding bar across a data gap) and emit a
+    marker at that bar's epoch. ``aligned`` asserts the fill price sits within that
+    bar's [low, high] (± tol for float noise) — the load-bearing check: a misplaced
+    marker is one whose fill price couldn't have printed in the bar it snapped to.
+    Fills before the first bar (outside the window) are dropped.
+    """
+    import bisect
+
+    grid: list[tuple[int, dict[str, Any]]] = []
+    for b in bars:
+        e = _epoch(b.get("time"))
+        if e is not None:
+            grid.append((e, b))
+    grid.sort(key=lambda g: g[0])
+    epochs = [g[0] for g in grid]
+
+    out: list[dict[str, Any]] = []
+    for f in fills:
+        fe = _epoch(f.get("time"))
+        price = f.get("price")
+        if fe is None or price is None or not grid:
+            continue
+        idx = bisect.bisect_right(epochs, fe) - 1
+        if idx < 0:
+            continue  # before the first bar — outside the visible window
+        bar_epoch, b = grid[idx]
+        low = float(b.get("low"))
+        high = float(b.get("high"))
+        aligned = (low - tol) <= float(price) <= (high + tol)
+        out.append(
+            {
+                "bar_time": bar_epoch,  # snapped 1-min bar start (UTC epoch) — where the marker draws
+                "fill_time": fe,  # the true fill epoch (for the tooltip)
+                "in_bar": fe < bar_epoch + 60,  # False => snapped across a data gap
+                "price": float(price),
+                "side": f.get("side"),
+                "kind": f.get("kind"),
+                "qty": f.get("qty"),
+                "aligned": aligned,
+                "bar_low": low,
+                "bar_high": high,
+            }
+        )
+    out.sort(key=lambda m: m["bar_time"])
+    return out
+
+
+def atr_fraction(daily_bars: list[dict[str, Any]], period: int = 14) -> float | None:
+    """Average True Range as a fraction of the last close, from cached DAILY bars
+    (oldest->newest, {high, low, close}). None when there isn't enough history.
+    This is the disclosed 'recent vol' input the advisory vol_stop is scaled by."""
+    if len(daily_bars) < 2:
+        return None
+    trs: list[float] = []
+    prev_close = float(daily_bars[0]["close"])
+    for b in daily_bars[1:]:
+        hi, lo, cl = float(b["high"]), float(b["low"]), float(b["close"])
+        trs.append(max(hi - lo, abs(hi - prev_close), abs(lo - prev_close)))
+        prev_close = cl
+    if not trs:
+        return None
+    window = trs[-period:]
+    atr = sum(window) / len(window)
+    last_close = float(daily_bars[-1]["close"])
+    if last_close <= 0:
+        return None
+    return atr / last_close
+
+
+def advisory_vol_stop(
+    entry: float, direction: int, atr_frac: float, atr_mult: float = 2.0
+) -> float:
+    """The adverse stop price the drafted vol_stop policy WOULD place, per the
+    exit-policy framework: stop when the adverse excursion reaches
+    ``atr_mult × atr_frac``. Long -> below entry; short -> above. ADVISORY only —
+    nothing executes off this; it visualizes the measurement layer."""
+    return round(entry * (1.0 - direction * atr_mult * atr_frac), 4)
+
+
+# flatten happens this many minutes before the real close (mirrors the driver's
+# pipeline.sim.daily.DEFAULT_FLATTEN_LEAD_MIN — the intraday flatten cutoff).
+FLATTEN_LEAD_MIN = 10
+
+
+def _latest_open_trade(session: Session, ticker: str) -> SimTrade | None:
+    return session.execute(
+        select(SimTrade)
+        .where(SimTrade.ticker == ticker, SimTrade.status == "open")
+        .order_by(SimTrade.entered_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def _horizon_end_date(entered_at: datetime, horizon_trading_days: int) -> str:
+    """Approximate horizon-end calendar date = entry date + N business days
+    (weekends skipped; holidays not modeled — labeled '~' in the UI). Good enough
+    to show whether the intended hold extends beyond today."""
+    d = entered_at.date()
+    added = 0
+    while added < max(0, horizon_trading_days):
+        d = d + timedelta(days=1)
+        if d.weekday() < 5:  # Mon-Fri
+            added += 1
+    return d.isoformat()
+
+
+def _signal_time(session: Session, ticker: str) -> dict[str, Any] | None:
+    """When the originating signal fired for this ticker, preferring the most
+    upstream real record we have: an open prediction's issue time, else an armed
+    catalyst's arm time, else the open paper trade's entry time. None if nothing
+    resolves."""
+    pred = session.execute(
+        select(Prediction)
+        .where(Prediction.ticker == ticker, Prediction.status == "open")
+        .order_by(Prediction.issued_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if pred is not None:
+        return {"time": _epoch(pred.issued_at.isoformat()), "source": "prediction", "label": "signal · prediction issued"}
+    armed = session.execute(
+        select(ArmedState)
+        .where(ArmedState.ticker == ticker, ArmedState.status == "armed")
+        .order_by(ArmedState.armed_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if armed is not None:
+        return {"time": _epoch(armed.armed_at.isoformat()), "source": "armed", "label": f"signal · armed ({armed.catalyst_type})"}
+    st = _latest_open_trade(session, ticker)
+    if st is not None:
+        return {"time": _epoch(st.entered_at.isoformat()), "source": "entry", "label": "signal · paper entry"}
+    return None
+
+
+def overlay_view(
+    ticker: str,
+    orders: list[dict[str, Any]],
+    positions: list[dict[str, Any]],
+    bars: list[dict[str, Any]],
+    clock: dict[str, Any] | None,
+    session: Session,
+    daily_bars: list[dict[str, Any]],
+    *,
+    today_et: str | None = None,
+    atr_mult: float = 2.0,
+) -> dict[str, Any]:
+    """Assemble the live-chart overlay for ONE ticker: exact fill markers (snapped
+    to the 1-min bar grid, with the alignment assertion) + the intent layer (entry
+    price line, flatten cutoff, signal-fired time, horizon-end, and the ADVISORY
+    vol_stop level). Everything real is unlabeled; the vol_stop is explicitly
+    ADVISORY. View-only — nothing here executes."""
+    tk = ticker.upper()
+    fills = _fills_with_kind([f for f in fills_from_orders(orders) if f["symbol"] == tk])
+    fill_markers = snap_fills_to_bars(fills, bars)
+    aligned_n = sum(1 for m in fill_markers if m["aligned"])
+
+    pos = next((p for p in positions if str(p.get("symbol", "")).upper() == tk), None)
+    entry_lines: list[dict[str, Any]] = []
+    advisory: list[dict[str, Any]] = []
+    horizon: dict[str, Any] | None = None
+    if pos is not None:
+        entry = _f(pos.get("avg_entry_price"))
+        direction = 1 if str(pos.get("side", "long")).lower() == "long" else -1
+        if entry:
+            entry_lines.append({"price": round(entry, 4), "side": pos.get("side"), "label": f"ENTRY ${entry:.2f}"})
+            af = atr_fraction(daily_bars)
+            if af is not None:
+                stop = advisory_vol_stop(entry, direction, af, atr_mult)
+                advisory.append(
+                    {
+                        "price": stop,
+                        "kind": "vol_stop",
+                        "atr_frac": round(af, 4),
+                        "atr_mult": atr_mult,
+                        "label": f"ADVISORY vol_stop · {atr_mult:g}×ATR({af * 100:.1f}%)",
+                    }
+                )
+        st = _latest_open_trade(session, tk)
+        if st is not None and st.horizon_trading_days is not None:
+            end = _horizon_end_date(st.entered_at, st.horizon_trading_days)
+            beyond = today_et is not None and end > today_et
+            horizon = {"end_date": end, "beyond_today": beyond, "label": f"horizon ~{end}"}
+
+    flatten: dict[str, Any] | None = None
+    nc = (clock or {}).get("next_close")
+    nc_epoch = _epoch(nc)
+    if nc_epoch is not None:
+        flatten = {"time": nc_epoch - FLATTEN_LEAD_MIN * 60, "label": f"flatten ~close−{FLATTEN_LEAD_MIN}m"}
+
+    return {
+        "configured": True,
+        "ticker": tk,
+        "fill_markers": fill_markers,
+        "alignment": {
+            "checked": len(fill_markers),
+            "aligned": aligned_n,
+            "misaligned": len(fill_markers) - aligned_n,
+        },
+        "entry_lines": entry_lines,
+        "advisory": advisory,
+        "flatten": flatten,
+        "signal": _signal_time(session, tk),
+        "horizon": horizon,
+    }
 
 
 def _epoch(iso_ts: str | None) -> int | None:
