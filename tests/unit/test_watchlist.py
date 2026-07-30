@@ -42,11 +42,16 @@ def test_watchlist_view_armed_state(session):
         id="raw1", source="Reuters", source_class="structured", url="https://ex.com/a",
         published_at=now, ingested_at=now, payload_json={"title": "PROC beats on earnings"},
     ))
+    # Flush parents (raw_items -> clusters) before the ArmedState child: FKs are
+    # enforced and there are no ORM relationships to order the flush.
+    session.flush()
     session.add(Cluster(cluster_id="c1", origin_item_id="raw1", member_count=1, created_at=now))
+    session.flush()
     session.add(ArmedState(
         ticker="PROC", cluster_id="c1", catalyst_type="earnings", event_ts=now,
         armed_at=now, status="armed", created_at=now,
     ))
+    session.flush()
     watchlist.add_pin(session, "PROC")
     session.commit()
 

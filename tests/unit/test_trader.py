@@ -191,16 +191,23 @@ def test_fills_from_orders_drops_unfilled():
 # --------------------------------------------------------------------------- #
 def _seed_provenance(session):
     now = datetime(2026, 7, 20, 13, 30, tzinfo=UTC)
+    # Flush each parent before its children: FKs are enforced (PRAGMA
+    # foreign_keys=ON) and these tables have no ORM relationships, so the UOW
+    # won't order parent-before-child within one flush (matches how the pipeline
+    # writes them in separate stages — see tests/integration/test_api.py::_seed).
     session.add(RawItem(
         id="raw1", source="Reuters", source_class="structured",
         url="https://ex.com/a", published_at=now, ingested_at=now,
         payload_json={"title": "AcmeCorp announces FDA approval"},
     ))
+    session.flush()
     session.add(Cluster(cluster_id="c1", origin_item_id="raw1", member_count=1, created_at=now))
+    session.flush()
     session.add(ClusterScore(cluster_id="c1", catalyst_type="fda", materiality=0.9,
                              high_alert=True, created_at=now))
     session.add(SimConfig(config_id="cfg1", name="fda-momentum", created_at=now,
                           params_json={}, enabled=True))
+    session.flush()
     session.add(SimTrade(
         trade_id="t1", config_id="cfg1", ticker="ACME", direction=1,
         entered_at=now, entry_price=100.0, entry_source="alpaca-paper",

@@ -20,6 +20,7 @@ applied here (COST_RT lives in the sim ledger, a separate lane).
 
 from __future__ import annotations
 
+from datetime import date as date_cls
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -516,11 +517,18 @@ def _report_cards_for_date(
     doesn't exist yet."""
     from pipeline.common.models import SimDailySummary
 
+    # session_date is a DATE column — comparing it to the raw request string
+    # ("2026-05-01") does not match under the SafeDate/sa.Date binding, so coerce
+    # to a date object first (this is why the day view returned no report cards).
+    try:
+        day = date_cls.fromisoformat(date) if isinstance(date, str) else date
+    except ValueError:
+        return []
     try:
         rows = (
             session.execute(
                 select(SimDailySummary)
-                .where(SimDailySummary.session_date == date)
+                .where(SimDailySummary.session_date == day)
                 .order_by(SimDailySummary.config_name)
             )
             .scalars()

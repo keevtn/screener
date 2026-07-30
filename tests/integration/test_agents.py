@@ -560,8 +560,10 @@ def test_provider_failure_persists_failed_run(engine):
     body = r.json()
     assert body["status"] == "failed"
     assert "credit balance" in body["error"]
-    # the response went through the normal path, so CORS headers survive
-    assert r.headers.get("access-control-allow-origin") == "http://localhost:3000"
+    # the response went through the normal path, so CORS headers survive. The
+    # default is now API_CORS_ORIGINS="*" (commit 6c0e873), so the wildcard is
+    # echoed rather than the request Origin.
+    assert r.headers.get("access-control-allow-origin") == "*"
     # and the failed run is on the ledger for the RANK page's recent-runs rail
     assert tc.get("/agents/rankings").json()[0]["status"] == "failed"
 
@@ -579,7 +581,8 @@ def test_unhandled_exception_keeps_cors_headers(engine):
     r = tc.get("/_boom", headers={"Origin": "http://localhost:3000"})
     assert r.status_code == 500
     assert "kaboom" in r.json()["detail"]
-    assert r.headers.get("access-control-allow-origin") == "http://localhost:3000"
+    # default API_CORS_ORIGINS="*" (commit 6c0e873) -> wildcard echoed
+    assert r.headers.get("access-control-allow-origin") == "*"
 
 
 # --- live smoke (excluded by default) ----------------------------------------
