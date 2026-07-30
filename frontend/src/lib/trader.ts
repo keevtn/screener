@@ -328,6 +328,73 @@ export function fetchDay(date: string): Promise<DayResult> {
   });
 }
 
+// --- watchlist lane (Phase 3) ----------------------------------------------
+export interface WatchPremarket {
+  session_date: string;
+  pm_pct: number | null;
+  pm_last: number | null;
+  reg_pct: number | null;
+  prior_close: number | null;
+}
+
+export interface WatchCatalyst {
+  catalyst_type: string | null;
+  high_alert: boolean;
+  headline: string | null;
+  url: string | null;
+  source: string | null;
+  source_class: string | null;
+  cluster_id: string | null;
+}
+
+export interface WatchPin {
+  ticker: string;
+  created_at: string;
+  note: string | null;
+  state: "armed" | "scheduled" | "watching";
+  state_label: string;
+  armed: { catalyst_type: string; armed_at: string; cluster_id: string } | null;
+  scheduled: { catalyst_type: string; event_date: string; stage: string | null } | null;
+  premarket: WatchPremarket | null;
+  buzz_z: number | null;
+  catalyst: WatchCatalyst | null;
+}
+
+export interface WatchlistResult {
+  reachable: boolean;
+  count: number;
+  items: WatchPin[];
+}
+
+export function fetchWatchlist(): Promise<WatchlistResult> {
+  return getJson<WatchlistResult>("/trader/watchlist", { reachable: false, count: 0, items: [] });
+}
+
+export async function pinTicker(ticker: string, note?: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${PRED_API}/trader/watchlist`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticker: ticker.toUpperCase(), note }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function unpinTicker(ticker: string): Promise<boolean> {
+  try {
+    const res = await fetch(
+      `${PRED_API}/trader/watchlist/${encodeURIComponent(ticker.toUpperCase())}`,
+      { method: "DELETE" },
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export function fetchMarkers(ticker: string): Promise<MarkersResult> {
   return getJson<MarkersResult>(`/trader/markers/${encodeURIComponent(ticker.toUpperCase())}`, {
     configured: false,

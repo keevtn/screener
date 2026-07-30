@@ -922,6 +922,24 @@ class ExtendedSessionDaily(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime)
 
 
+class WatchlistPin(Base):
+    """A user-pinned ticker for the TRADER watchlist lane (Phase 3).
+
+    Deliberately stored in OUR DB (not Alpaca's watchlist store) so each pin wires
+    into the local catalyst / buzz / armed-state machinery — the lane shows an
+    'armed — waiting for catalyst' read per pin, which Alpaca's flat symbol list
+    couldn't express. This is a MUTABLE user table (pin/unpin), carries no
+    immutability hook, and never places orders — view/stage only.
+    """
+
+    __tablename__ = "watchlist_pins"
+
+    ticker: Mapped[str] = mapped_column(sa.String(12), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    note: Mapped[str | None] = mapped_column(sa.Text)
+    source: Mapped[str] = mapped_column(sa.String(16), default="user")  # provenance
+
+
 # --- PMR: panels frozen except the report-card fields ---------------------------
 
 _PREMARKET_GRADE_FIELDS = {"graded_at", "outcomes_json", "summary_json"}

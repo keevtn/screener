@@ -246,6 +246,13 @@ class RejectRequest(BaseModel):
     reason: str = Field(..., min_length=1)
 
 
+class WatchlistPinRequest(BaseModel):
+    """Pin a ticker to the TRADER watchlist (our DB, view/stage only)."""
+
+    ticker: str = Field(..., min_length=1, max_length=12)
+    note: str | None = None
+
+
 class DeepDiveEvidenceOut(BaseModel):
     point: str
     cluster_id: str | None = None
@@ -364,6 +371,9 @@ def _baseline_configs(session: Session) -> dict[str, str]:
 def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = None) -> FastAPI:
     engine = engine or make_engine()
     ensure_indexes(engine)  # backfill perf indexes onto a long-lived DB (idempotent)
+    from pipeline.api.watchlist import ensure_watchlist_table
+
+    ensure_watchlist_table(engine)  # self-heal the Phase-3 watchlist table on boot
     app = FastAPI(title="Market News Prediction API", version="1", docs_url="/docs")
 
     # The Next.js dashboard (a different origin) posts to /agents/rank/run, so the
@@ -1151,6 +1161,39 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
         except Exception:  # noqa: BLE001
             log.warning("trader markers fetch failed", exc_info=True)
             return {"configured": True, "available": False, "ticker": ticker.upper(), "markers": []}
+
+    # --- TRADER watchlist lane (Phase 3): pinned tickers in OUR DB ------------
+    # View/stage only. Pins live in our watchlist_pins table (not Alpaca's) so
+    # each wires into the local armed-state / buzz / catalyst machinery. These
+    # endpoints write ONLY to our DB and never touch Alpaca or place an order.
+    from pipeline.api import watchlist as _watchlist
+
+    @app.get("/trader/watchlist")
+    def get_trader_watchlist(session: Session = Depends(get_session)) -> dict[str, Any]:
+        """Pinned tickers enriched with armed/scheduled catalyst state, buzz z,
+        latest premarket move, and most-recent catalyst headline."""
+        return _watchlist.watchlist_view(session)
+
+    @app.post("/trader/watchlist")
+    def pin_trader_watchlist(
+        body: WatchlistPinRequest, session: Session = Depends(get_session)
+    ) -> dict[str, Any]:
+        """Pin a ticker (idempotent; re-pin updates the note). Writes our DB only."""
+        try:
+            pin = _watchlist.add_pin(session, body.ticker, body.note)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"ticker": pin.ticker, "note": pin.note, "created_at": pin.created_at.isoformat()}
+
+    @app.delete("/trader/watchlist/{ticker}")
+    def unpin_trader_watchlist(
+        ticker: str, session: Session = Depends(get_session)
+    ) -> dict[str, Any]:
+        """Unpin a ticker. Writes our DB only."""
+        removed = _watchlist.remove_pin(session, ticker)
+        if not removed:
+            raise HTTPException(status_code=404, detail="ticker not pinned")
+        return {"ticker": ticker.upper(), "removed": True}
 
     @app.get("/tickers/{ticker}/sim/bars")
     def get_sim_bars(ticker: str, hours: int = Query(24, ge=1, le=168)) -> dict[str, Any]:

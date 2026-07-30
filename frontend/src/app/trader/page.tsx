@@ -9,6 +9,7 @@ import PositionsTable from "@/components/tape/PositionsTable";
 import TraderBlotter from "@/components/tape/TraderBlotter";
 import PnlCalendar from "@/components/tape/PnlCalendar";
 import DayDetail from "@/components/tape/DayDetail";
+import Watchlist from "@/components/tape/Watchlist";
 import {
   CURVE_TIMEFRAMES,
   fetchBlotter,
@@ -79,7 +80,7 @@ export default function TraderPage() {
   const [configFilter, setConfigFilter] = useState<string>(""); // config_id, "" = all
 
   // History view (Phase 2): P&L calendar + selected-day detail.
-  const [view, setView] = useState<"overview" | "history">("overview");
+  const [view, setView] = useState<"overview" | "history" | "watchlist">("overview");
   const [monthDate, setMonthDate] = useState<Date>(() => new Date());
   const [calendar, setCalendar] = useState<CalendarResult | null>(null);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
@@ -212,7 +213,7 @@ export default function TraderPage() {
             role="group"
             aria-label="Trader view"
           >
-            {(["overview", "history"] as const).map((v) => (
+            {(["overview", "history", "watchlist"] as const).map((v) => (
               <button
                 key={v}
                 onClick={() => setView(v)}
@@ -229,7 +230,9 @@ export default function TraderPage() {
           </div>
 
           <div className="flex-1 overflow-y-auto">
-            {view === "history" ? (
+            {view === "watchlist" ? (
+              <Watchlist />
+            ) : view === "history" ? (
               <>
                 <PnlCalendar
                   monthDate={monthDate}
