@@ -48,6 +48,10 @@ function isHttp(url: string | null): url is string {
 export default function LedgerPage() {
   const clock = useClock();
   const [status, setStatus] = useState<StatusFilter>("all");
+  // Baselines (always_up/random/momentum) shadow every real prediction — same
+  // headline, own direction — so including them shows each story ~4× with mixed
+  // signs. Off by default: the ledger is the real signal; baselines are opt-in.
+  const [showBaselines, setShowBaselines] = useState(false);
   const [page, setPage] = useState(0);
   const [items, setItems] = useState<LedgerPrediction[]>([]);
   const [reachable, setReachable] = useState(true);
@@ -63,18 +67,19 @@ export default function LedgerPage() {
 
   useEffect(() => {
     setLoading(true);
-  }, [status]);
+  }, [status, showBaselines]);
 
   // Reset to the first page whenever the visible set changes.
   useEffect(() => {
     setPage(0);
-  }, [status]);
+  }, [status, showBaselines]);
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
       const r = await fetchLedger({
         status: status === "all" ? undefined : status,
+        kind: showBaselines ? undefined : "real", // default: real signal only
         limit: FETCH_LIMIT,
       });
       if (cancelled) return;
@@ -89,7 +94,7 @@ export default function LedgerPage() {
       cancelled = true;
       clearInterval(t);
     };
-  }, [status, pushTick]);
+  }, [status, showBaselines, pushTick]);
 
   const stats = useMemo(() => {
     const graded = items.filter((p) => p.status === "graded");
@@ -132,9 +137,21 @@ export default function LedgerPage() {
             </button>
           ))}
         </div>
+        <button
+          onClick={() => setShowBaselines((v) => !v)}
+          aria-pressed={showBaselines}
+          title="Baselines (always_up / random / momentum) shadow every real prediction to benchmark it. They share the real's headline but carry their own direction, so showing them repeats each story with mixed signs."
+          className={`px-2.5 py-1 rounded tracking-[0.08em] uppercase border ${
+            showBaselines
+              ? "bg-tape-panel text-tape-accent border-tape-border"
+              : "text-tape-faint hover:text-tape-sub border-transparent"
+          }`}
+        >
+          {showBaselines ? "baselines: on" : "baselines: off"}
+        </button>
         <span className="text-tape-faint ml-auto flex gap-4">
           <span>
-            total <span className="text-tape-sub">{stats.total}</span>
+            {showBaselines ? "rows" : "signals"} <span className="text-tape-sub">{stats.total}</span>
           </span>
           <span>
             open <span className="text-tape-sub">{stats.open}</span>
@@ -183,6 +200,9 @@ export default function LedgerPage() {
               {pageItems.map((p) => (
                 <tr
                   key={p.prediction_id}
+                  // No row-level opacity dimming: it would blend the faint/dim text
+                  // back below the WCAG 1.4.3 4.5:1 floor. The warn `base·kind` badge
+                  // is the (contrast-safe) baseline marker instead.
                   className="border-b border-tape-border-soft hover:bg-tape-panel-2"
                 >
                   <td className="px-4 py-2">
@@ -192,7 +212,19 @@ export default function LedgerPage() {
                     />
                   </td>
                   <td className={`px-2 py-2 font-semibold ${dirColor(p.direction)}`}>
-                    {p.direction === "bullish" ? "▲" : "▼"} {p.direction}
+                    <div className="flex items-center gap-1.5">
+                      <span>
+                        {p.direction === "bullish" ? "▲" : "▼"} {p.direction}
+                      </span>
+                      {p.is_baseline && (
+                        <span
+                          className="text-[9px] font-normal uppercase tracking-[0.06em] text-tape-warn border border-tape-border rounded px-1 py-px"
+                          title={`Benchmark baseline (${p.baseline_kind}) — not the real signal`}
+                        >
+                          base·{p.baseline_kind}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-2 py-2 text-tape-sub">{p.confidence.toFixed(2)}</td>
                   <td className="px-2 py-2 text-tape-faint">{p.horizon_trading_days}d</td>
@@ -286,7 +318,9 @@ export default function LedgerPage() {
       <HealthStrip
         note={
           reachable
-            ? "prediction ledger :8001 · immutable (I3/I4) · outcomes grader-filled · origin news via prediction_context"
+            ? showBaselines
+              ? "prediction ledger :8001 · real signal + benchmark baselines (always_up/random/momentum shadow each real)"
+              : "prediction ledger :8001 · real signal only · toggle BASELINES to see the benchmark shadows"
             : "prediction API offline :8001"
         }
       />

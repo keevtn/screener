@@ -165,6 +165,63 @@ def test_predictions_carry_origin_context_and_lane_filter(engine):
     assert client.get("/predictions", params={"source_class": "bogus"}).status_code == 422
 
 
+def test_predictions_kind_filters_baselines(engine):
+    """The ledger surfaced baseline SHADOWS (always_up/random/momentum) next to the
+    real prediction — same ticker/issued_at/headline, differing directions — which
+    reads as duplicated corrupt data. ?kind=real hides them (the LEDGER default),
+    ?kind=baseline isolates them, and each row self-labels via is_baseline/kind."""
+    from pipeline.common.models import Config
+
+    _seed(engine)  # 2 real predictions (p-graded, p-open)
+    with Session(engine) as s:
+        s.add(
+            Config(
+                config_version="cfg-base-mom",
+                params_json={"baseline": "momentum", "k": 5},
+                params_hash="test-baseline-momentum-hash",
+                created_at=ISSUED,
+                notes="baseline momentum",
+            )
+        )
+        s.add(
+            Prediction(
+                prediction_id="p-base",
+                ticker="AAPL",
+                direction="bearish",  # momentum's own call — differs from the real on purpose
+                confidence=0.5,
+                horizon_trading_days=3,
+                threshold=0.02,
+                issued_at=ISSUED,
+                config_version="cfg-base-mom",
+                evidence_json={"baseline": "momentum", "shadows": "p-graded"},
+                status="open",
+            )
+        )
+        s.commit()
+
+    client = _client(engine)
+
+    # Default = both (unchanged shape for other callers), but each row is labelled.
+    all_body = client.get("/predictions").json()
+    assert all_body["count"] == 3
+    by_id = {p["prediction_id"]: p for p in all_body["items"]}
+    assert by_id["p-base"]["is_baseline"] is True
+    assert by_id["p-base"]["baseline_kind"] == "momentum"
+    assert by_id["p-graded"]["is_baseline"] is False
+
+    # kind=real hides baselines with an accurate count (the LEDGER default).
+    real = client.get("/predictions", params={"kind": "real"}).json()
+    assert real["count"] == 2
+    assert {p["prediction_id"] for p in real["items"]} == {"p-graded", "p-open"}
+    assert all(not p["is_baseline"] for p in real["items"])
+
+    # kind=baseline isolates the measurement machinery.
+    base = client.get("/predictions", params={"kind": "baseline"}).json()
+    assert base["count"] == 1 and base["items"][0]["prediction_id"] == "p-base"
+
+    assert client.get("/predictions", params={"kind": "bogus"}).status_code == 422
+
+
 def test_intraday_live_degrades_without_redis(engine, monkeypatch):
     # Redis down -> live:false + empty items; the panel falls back to client bucketing.
     import pipeline.common.events as ev

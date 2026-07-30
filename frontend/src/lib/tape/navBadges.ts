@@ -121,7 +121,9 @@ export function useNavBadges(): NavBadges {
   const refetch = useCallback(async () => {
     const [fired, ledger, news] = await Promise.all([
       fetchFired(50).catch(() => [] as FiredCatalyst[]),
-      fetchLedger({ limit: 300 })
+      // kind=real: the LEDGER badge counts real signals, not the ~3 baseline
+      // shadows each one carries (which would inflate "new since seen" ~4x).
+      fetchLedger({ kind: "real", limit: 300 })
         .then((r) => r.items)
         .catch(() => [] as LedgerPrediction[]),
       fetchNews(300).catch(() => [] as NewsItem[]),

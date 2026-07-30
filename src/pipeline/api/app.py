@@ -106,6 +106,11 @@ class PredictionOut(BaseModel):
     headline: str | None = None  # originating article title
     url: str | None = None  # originating article link (rendered as a safe external link)
     source: str | None = None  # originating source name
+    # A baseline is a SHADOW of a real prediction (always_up / random / momentum),
+    # sharing the real's ticker+issued_at+origin headline but with its own direction —
+    # the measurement machinery, not a signal. The LEDGER hides these by default.
+    is_baseline: bool = False
+    baseline_kind: str | None = None  # 'always_up' | 'random' | 'momentum' when is_baseline
 
 
 class PredictionPage(BaseModel):
@@ -317,7 +322,9 @@ def _ranking_run_out(run: RankingRun, items: list[Ranking]) -> RankingRunOut:
     )
 
 
-def _prediction_out(p: Prediction, ctx: PredictionContext | None = None) -> PredictionOut:
+def _prediction_out(
+    p: Prediction, ctx: PredictionContext | None = None, baseline_kind: str | None = None
+) -> PredictionOut:
     return PredictionOut(
         prediction_id=p.prediction_id,
         ticker=p.ticker,
@@ -336,7 +343,21 @@ def _prediction_out(p: Prediction, ctx: PredictionContext | None = None) -> Pred
         headline=ctx.headline if ctx else None,
         url=ctx.url if ctx else None,
         source=ctx.source if ctx else None,
+        is_baseline=baseline_kind is not None,
+        baseline_kind=baseline_kind,
     )
+
+
+def _baseline_configs(session: Session) -> dict[str, str]:
+    """config_version -> baseline kind ('always_up'|'random'|'momentum') for the
+    baseline (shadow) configs. A config is a baseline iff its params carry a
+    'baseline' key (see grade.baselines.ensure_baseline_configs). Real configs are
+    absent. The configs table is tiny, so this is a cheap per-request lookup."""
+    out: dict[str, str] = {}
+    for cv, params in session.execute(select(Config.config_version, Config.params_json)).all():
+        if isinstance(params, dict) and params.get("baseline"):
+            out[cv] = str(params["baseline"])
+    return out
 
 
 def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = None) -> FastAPI:
@@ -429,6 +450,7 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
         status: str | None = None,
         outcome: str | None = None,
         source_class: str | None = None,
+        kind: str | None = None,
         limit: int = Query(50, ge=1, le=1000),
         offset: int = Query(0, ge=0),
     ) -> PredictionPage:
@@ -436,11 +458,21 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
         (source_class / headline / url / source) via a single LEFT JOIN to the
         companion table — no N+1 lookups. ``source_class`` filters to a LEDGER lane
         (structured|social|mixed); predictions with no resolved origin are excluded
-        from a lane filter but still counted under no filter."""
+        from a lane filter but still counted under no filter.
+
+        ``kind`` filters real vs baseline predictions: 'real' (the actual signal),
+        'baseline' (the always_up/random/momentum shadows used to benchmark it), or
+        omit for both. Every real prediction is shadowed by ~3 baselines that share
+        its ticker/issued_at/origin headline but carry their own direction — omitting
+        the filter therefore returns each story several times with mixed directions,
+        which is why the LEDGER page defaults to kind='real'."""
         if source_class is not None and source_class not in ("structured", "social", "mixed"):
             raise HTTPException(
                 status_code=422, detail="source_class must be structured|social|mixed"
             )
+        if kind is not None and kind not in ("real", "baseline"):
+            raise HTTPException(status_code=422, detail="kind must be real|baseline")
+        baseline_kinds = _baseline_configs(session)
         conds = []
         if ticker:
             conds.append(Prediction.ticker == ticker)
@@ -450,6 +482,13 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
             conds.append(Prediction.status == status)
         if outcome:
             conds.append(Prediction.outcome == outcome)
+        # real vs baseline: a baseline's config carries a 'baseline' param. Guard the
+        # empty set (no baseline configs yet) so we emit no degenerate IN () clause.
+        bset = list(baseline_kinds)
+        if kind == "real" and bset:
+            conds.append(Prediction.config_version.notin_(bset))
+        elif kind == "baseline":
+            conds.append(Prediction.config_version.in_(bset))
         # A lane filter needs an INNER join (only resolved rows have a source_class);
         # otherwise a LEFT join so every ledger row still renders, context or not.
         if source_class is not None:
@@ -473,7 +512,12 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
             .limit(limit)
             .offset(offset)
         ).all()
-        return PredictionPage(count=count, items=[_prediction_out(p, ctx) for p, ctx in rows])
+        return PredictionPage(
+            count=count,
+            items=[
+                _prediction_out(p, ctx, baseline_kinds.get(p.config_version)) for p, ctx in rows
+            ],
+        )
 
     @app.get("/metrics", response_model=list[MetricsOut])
     def get_metrics(session: Session = Depends(get_session)) -> list[MetricsOut]:

@@ -16,7 +16,11 @@ export interface LivePrediction {
 export async function fetchPredictionMap(limit = 300): Promise<Map<string, LivePrediction>> {
   const map = new Map<string, LivePrediction>();
   try {
-    const res = await fetch(`${PRED_API}/predictions?limit=${limit}`, { cache: "no-store" });
+    // kind=real: overlay the actual signal, never a baseline shadow (which shares a
+    // real's ticker+issued_at, so it can otherwise win the first-per-ticker pick).
+    const res = await fetch(`${PRED_API}/predictions?kind=real&limit=${limit}`, {
+      cache: "no-store",
+    });
     if (!res.ok) return map;
     const body = await res.json();
     for (const p of (body.items ?? []) as LivePrediction[]) {
@@ -47,6 +51,10 @@ export interface LedgerPrediction {
   headline: string | null; // originating article title
   url: string | null; // originating article link
   source: string | null; // originating source name
+  // Baseline shadows (always_up/random/momentum) benchmark the real signal — same
+  // ticker/issued_at/headline, own direction. LEDGER hides them by default.
+  is_baseline: boolean;
+  baseline_kind: string | null; // "always_up" | "random" | "momentum" when is_baseline
 }
 
 export interface LedgerResult {
@@ -56,13 +64,20 @@ export interface LedgerResult {
 }
 
 export async function fetchLedger(
-  opts: { status?: string; outcome?: string; sourceClass?: string; limit?: number } = {},
+  opts: {
+    status?: string;
+    outcome?: string;
+    sourceClass?: string;
+    kind?: string;
+    limit?: number;
+  } = {},
 ): Promise<LedgerResult> {
   const p = new URLSearchParams();
   p.set("limit", String(opts.limit ?? 200));
   if (opts.status) p.set("status", opts.status);
   if (opts.outcome) p.set("outcome", opts.outcome);
   if (opts.sourceClass) p.set("source_class", opts.sourceClass);
+  if (opts.kind) p.set("kind", opts.kind);
   try {
     const res = await fetch(`${PRED_API}/predictions?${p}`, { cache: "no-store" });
     if (!res.ok) return { reachable: false, count: 0, items: [] };
