@@ -125,6 +125,30 @@ def test_data_beyond_seed_counts_excluded_tables(tmp_path):
     assert volume.data_beyond_seed("sqlite:///no/such/file.db") is False  # missing -> False
 
 
+def test_kill_switch_bypasses_guard(monkeypatch, caplog):
+    # TRADER_VOLUME_GUARD=off must let a trade path proceed even when every proof
+    # fails (the operator override), with a loud bypass banner.
+    _set_railway(monkeypatch)
+    _both_false(monkeypatch)
+    monkeypatch.setenv("TRADER_VOLUME_GUARD", "off")
+    assert volume.guard_enabled() is False
+    log = logging.getLogger("test.volume.killswitch")
+    with caplog.at_level(logging.WARNING):
+        ok = volume.require_persistent_volume(log, "TRADER driver", "sqlite:////data/pipeline.db")
+    assert ok is True
+    assert any("VOLUME GUARD BYPASSED" in r.getMessage() for r in caplog.records)
+
+
+def test_guard_enabled_default_and_values(monkeypatch):
+    monkeypatch.delenv("TRADER_VOLUME_GUARD", raising=False)
+    assert volume.guard_enabled() is True                 # default ON
+    for v in ("off", "false", "0", "no", "disabled", "OFF"):
+        monkeypatch.setenv("TRADER_VOLUME_GUARD", v)
+        assert volume.guard_enabled() is False
+    monkeypatch.setenv("TRADER_VOLUME_GUARD", "on")
+    assert volume.guard_enabled() is True
+
+
 def test_data_beyond_seed_empty_db_is_false(tmp_path):
     # a just-hydrated ephemeral DB: schema exists but raw_items/clusters are empty
     import sqlite3

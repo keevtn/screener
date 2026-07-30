@@ -196,9 +196,34 @@ def volume_status(db_url: str | None = None) -> dict[str, Any]:
     }
 
 
+def guard_enabled() -> bool:
+    """The volume guard is ON by default. TRADER_VOLUME_GUARD=off (or false/0/no)
+    is an operator KILL SWITCH that bypasses the persistence check entirely — an
+    escape hatch for when the automated detection is wrong (e.g. a real volume the
+    heuristics can't confirm) and trading must proceed anyway."""
+    return (os.environ.get("TRADER_VOLUME_GUARD", "on") or "on").strip().lower() not in (
+        "off",
+        "false",
+        "0",
+        "no",
+        "disabled",
+    )
+
+
 def require_persistent_volume(log: logging.Logger, purpose: str, db_url: str | None = None) -> bool:
     """Gate a trade/write path on volume persistence. Logs a loud, self-explaining
-    banner and returns True (proceed) / False (refuse). Fail-closed on Railway."""
+    banner and returns True (proceed) / False (refuse). Fail-closed on Railway,
+    UNLESS the operator kill switch TRADER_VOLUME_GUARD=off is set."""
+    if not guard_enabled():
+        st = volume_status(db_url)
+        log.warning(
+            "=== VOLUME GUARD BYPASSED (TRADER_VOLUME_GUARD=off) === %s proceeding WITHOUT "
+            "persistence confirmation. Operator override — if this is an ephemeral container, "
+            "writes will NOT persist and it may trade the real account off a throwaway DB. "
+            "Detector said: %s",
+            purpose, st["reason"],
+        )
+        return True
     st = volume_status(db_url)
     if st["ok"]:
         if st["on_railway"]:
