@@ -8,7 +8,9 @@ guidance language overrides results-level text direction.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -19,6 +21,35 @@ from pipeline.common.timeutil import utcnow
 from pipeline.enrich.canonical import CanonicalItem, from_raw_item
 from pipeline.enrich.tiers import SourceTiers, load_source_tiers
 from pipeline.score.catalysts import CatalystTaxonomy, load_taxonomy
+
+log = logging.getLogger("pipeline.score")
+
+# FinBERT inference sub-batch. A whole 256-cluster chunk in ONE onnx call is a
+# large tensor (batch × 512 tokens) that can crash/OOM the score step on a small
+# instance — the single-text self-test never hits it, so the failure is silent
+# and zeroes ALL cluster_scores (observed on Railway 2026-07-30). Running FinBERT
+# in small sub-batches bounds peak memory and localizes any failure.
+_FINBERT_SUB_BATCH = 16
+
+
+def _finbert_scores(finbert: Any, pairs: list[tuple[str, str]]) -> list[Any]:
+    """FinBERT over pairs in small sub-batches, resilient to a batch-level
+    inference failure. A failed sub-batch falls back to None (LM-only) for those
+    rows and logs loudly, so the sweep keeps writing cluster_scores instead of
+    dying and producing zero scores."""
+    if finbert is None:
+        return [None] * len(pairs)
+    out: list[Any] = []
+    for i in range(0, len(pairs), _FINBERT_SUB_BATCH):
+        sub = pairs[i : i + _FINBERT_SUB_BATCH]
+        try:
+            out.extend(finbert.analyze_text_batch(sub))
+        except Exception as exc:  # noqa: BLE001 — a bad batch must not zero the sweep
+            log.warning(
+                "finbert inference failed on %d rows (%r); LM-only for these", len(sub), exc
+            )
+            out.extend([None] * len(sub))
+    return out
 from pipeline.score.routing import text_kind_of
 from pipeline.score.sentiment import SentimentScores, score_sentiment
 
@@ -147,7 +178,7 @@ def score_clusters(
     for start in range(0, len(rows), batch_size):
         chunk = rows[start : start + batch_size]
         pairs = [(it.title, it.description) for _, it in chunk]
-        fb = finbert.analyze_text_batch(pairs) if finbert is not None else [None] * len(pairs)
+        fb = _finbert_scores(finbert, pairs)
         lm_r = lm.analyze_text_batch(pairs) if lm is not None else [None] * len(pairs)
         for (cluster_id, origin), f, lval in zip(chunk, fb, lm_r, strict=True):
             sent = SentimentScores(
