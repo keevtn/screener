@@ -417,7 +417,7 @@ def main() -> None:
     from pipeline.common.volume import volume_status
 
     _vs = volume_status(args.url)
-    if _vs["on_railway"] and not _vs["persistent"]:
+    if _vs["on_railway"] and not _vs["confirmed"]:
         log.warning(
             "=== EPHEMERAL CONTAINER — NO PERSISTENT VOLUME === pipeline writes here "
             "will NOT persist. %s (RAILWAY_VOLUME_MOUNT_PATH=%r). Likely a deploy "

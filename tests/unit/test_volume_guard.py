@@ -19,6 +19,13 @@ def _set_railway(monkeypatch):
     monkeypatch.setenv("RAILWAY_VOLUME_MOUNT_PATH", "/data")
 
 
+def _both_false(monkeypatch):
+    # neither positive proof holds (control the two signals directly, so the tests
+    # are platform-independent — no reliance on real st_dev / os.access)
+    monkeypatch.setattr(volume, "is_persistent_mount", lambda p: False)
+    monkeypatch.setattr(volume, "mount_path_confirms", lambda p: False)
+
+
 # --- sqlite_dir parsing -----------------------------------------------------
 def test_sqlite_dir_absolute_and_relative():
     # basename is platform-agnostic (abspath prepends a drive on Windows; on
@@ -29,25 +36,61 @@ def test_sqlite_dir_absolute_and_relative():
     assert volume.sqlite_dir("sqlite:///:memory:") is None
 
 
+# --- mount_path_confirms (the primary Railway proof) ------------------------
+def test_mount_path_confirms_under_and_writable(monkeypatch):
+    # use os.sep so the under-path check matches on any platform (prod is Linux)
+    mount = os.sep + "data"
+    monkeypatch.setenv("RAILWAY_VOLUME_MOUNT_PATH", mount)
+    monkeypatch.setattr(os, "access", lambda p, m: True)  # writable
+    monkeypatch.setattr(os.path, "realpath", lambda p: p)  # identity for the test
+    assert volume.mount_path_confirms(mount) is True                       # dir == mount
+    assert volume.mount_path_confirms(mount + os.sep + "sub") is True      # under mount
+    assert volume.mount_path_confirms(os.sep + "other") is False           # not under mount
+
+
+def test_mount_path_confirms_requires_env_and_writable(monkeypatch):
+    mount = os.sep + "data"
+    monkeypatch.setattr(os.path, "realpath", lambda p: p)
+    monkeypatch.delenv("RAILWAY_VOLUME_MOUNT_PATH", raising=False)
+    assert volume.mount_path_confirms(mount) is False           # no env -> not confirmed
+    monkeypatch.setenv("RAILWAY_VOLUME_MOUNT_PATH", mount)
+    monkeypatch.setattr(os, "access", lambda p, m: False)       # not writable
+    assert volume.mount_path_confirms(mount) is False
+
+
 # --- decision matrix (persistence x on_railway) -----------------------------
 def test_not_on_railway_always_ok(monkeypatch):
     _clear_railway(monkeypatch)
-    monkeypatch.setattr(volume, "is_persistent_mount", lambda p: False)
+    _both_false(monkeypatch)
     st = volume.volume_status("sqlite:////data/pipeline.db")
     assert st["ok"] is True and st["on_railway"] is False
 
 
-def test_railway_with_volume_ok(monkeypatch):
+def test_railway_stdev_confirms(monkeypatch):
+    # secondary proof: DB on a separate device from / (mount-path proof absent)
     _set_railway(monkeypatch)
     monkeypatch.setattr(volume, "is_persistent_mount", lambda p: True)
+    monkeypatch.setattr(volume, "mount_path_confirms", lambda p: False)
     st = volume.volume_status("sqlite:////data/pipeline.db")
-    assert st["ok"] is True and st["persistent"] is True
+    assert st["ok"] is True and st["confirmed"] is True
 
 
-def test_railway_without_volume_refused(monkeypatch):
-    # the exact ephemeral-cutover signature: on Railway, DB on the overlay
+def test_railway_mount_path_confirms_despite_same_stdev(monkeypatch):
+    # THE FALSE-REFUSAL REGRESSION: a real Railway volume that shares the root
+    # device (st_dev == /) but has RAILWAY_VOLUME_MOUNT_PATH set with the DB under
+    # it must now be CONFIRMED, not refused. This is what took the driver down.
     _set_railway(monkeypatch)
-    monkeypatch.setattr(volume, "is_persistent_mount", lambda p: False)
+    monkeypatch.setattr(volume, "is_persistent_mount", lambda p: False)  # same device
+    monkeypatch.setattr(volume, "mount_path_confirms", lambda p: True)   # mount-path proof
+    st = volume.volume_status("sqlite:////data/pipeline.db")
+    assert st["ok"] is True
+    assert st["mount_confirmed"] is True and st["persistent"] is False
+
+
+def test_railway_true_ephemeral_refused(monkeypatch):
+    # true cutover: neither proof holds -> still refuse (fail-closed preserved)
+    _set_railway(monkeypatch)
+    _both_false(monkeypatch)
     st = volume.volume_status("sqlite:////data/pipeline.db")
     assert st["ok"] is False
     assert "EPHEMERAL" in st["reason"]
@@ -61,7 +104,7 @@ def test_non_sqlite_backend_ok(monkeypatch):
 
 def test_require_persistent_volume_logs_and_returns(monkeypatch, caplog):
     _set_railway(monkeypatch)
-    monkeypatch.setattr(volume, "is_persistent_mount", lambda p: False)
+    _both_false(monkeypatch)
     log = logging.getLogger("test.volume")
     with caplog.at_level(logging.ERROR):
         ok = volume.require_persistent_volume(log, "TRADER driver", "sqlite:////data/pipeline.db")

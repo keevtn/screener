@@ -58,11 +58,36 @@ def sqlite_dir(db_url: str) -> str | None:
 def is_persistent_mount(path: str) -> bool:
     """True if ``path`` lives on a different device than the container root '/',
     i.e. a real mounted volume rather than the overlay filesystem. Robust to
-    subpaths of the mount; False on any stat error (fail-closed)."""
+    subpaths of the mount; False on any stat error (fail-closed).
+
+    NOTE: this is a SECONDARY signal. Observed in production, a real Railway
+    volume does NOT always present a distinct st_dev (the mount can share the
+    root device), so a False here does not by itself mean 'ephemeral' — see
+    mount_path_confirms for the primary Railway proof."""
     try:
         return os.stat(path).st_dev != os.stat("/").st_dev
     except OSError:
         return False
+
+
+def mount_path_confirms(db_dir: str) -> bool:
+    """PRIMARY Railway proof: RAILWAY_VOLUME_MOUNT_PATH is set, the DB directory
+    resolves UNDER that mount path, and the mount is writable.
+
+    This is trustworthy because Railway injects RAILWAY_VOLUME_MOUNT_PATH only for
+    a container that actually has the volume attached — a true deploy-cutover
+    container running volume-less does not get it (or the DB won't resolve under
+    it), so this stays False there and the trade path still refuses."""
+    mp = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+    if not mp:
+        return False
+    try:
+        db = os.path.realpath(db_dir)
+        mount = os.path.realpath(mp)
+    except OSError:
+        return False
+    under = db == mount or db.startswith(mount.rstrip("/\\") + os.sep)
+    return under and os.access(mp, os.W_OK)
 
 
 def volume_status(db_url: str | None = None) -> dict[str, Any]:
@@ -80,25 +105,37 @@ def volume_status(db_url: str | None = None) -> dict[str, Any]:
             "ok": True,
             "on_railway": railway,
             "db_dir": None,
+            "confirmed": True,
+            "mount_confirmed": False,
             "persistent": True,
             "railway_volume_path": os.environ.get("RAILWAY_VOLUME_MOUNT_PATH"),
             "reason": "non-sqlite/in-memory backend (not filesystem-bound)",
         }
+    # Two independent positive proofs; EITHER confirms persistence:
+    #   1. mount_path_confirms — RAILWAY_VOLUME_MOUNT_PATH set + DB under it +
+    #      writable (primary; robust to a volume that shares the root device).
+    #   2. is_persistent_mount — DB on a different device than '/' (secondary).
+    mount_ok = mount_path_confirms(dbdir)
     persistent = is_persistent_mount(dbdir)
-    ok = persistent or not railway
-    if persistent:
-        reason = f"persistent volume confirmed at {dbdir} (separate device from /)"
+    confirmed = mount_ok or persistent
+    ok = confirmed or not railway
+    if mount_ok:
+        reason = f"volume confirmed: {dbdir} under RAILWAY_VOLUME_MOUNT_PATH (writable)"
+    elif persistent:
+        reason = f"volume confirmed: {dbdir} on a separate device from /"
     elif not railway:
         reason = f"not on Railway; {dbdir} shares the root device (local/CI — allowed)"
     else:
         reason = (
-            f"EPHEMERAL: {dbdir} is on the container overlay, not a mounted volume — "
-            "writes here will NOT persist"
+            f"EPHEMERAL: {dbdir} is not under a mounted volume (no RAILWAY_VOLUME_MOUNT_PATH "
+            "match, same device as /) — writes here will NOT persist"
         )
     return {
         "ok": ok,
         "on_railway": railway,
         "db_dir": dbdir,
+        "confirmed": confirmed,
+        "mount_confirmed": mount_ok,
         "persistent": persistent,
         "railway_volume_path": os.environ.get("RAILWAY_VOLUME_MOUNT_PATH"),
         "reason": reason,
