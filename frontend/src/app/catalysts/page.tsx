@@ -228,8 +228,12 @@ export default function CatalystsPage() {
   // --- day calendar + extended follow-through (folded into the morning panel) ---
   const extDates = ext?.available_dates ?? [];
   const extMovers = ext?.movers ?? [];
-  // Viewing a past session = a date is selected that isn't the newest available.
-  const viewingPast = extDates.length > 0 && !!ext && ext.date !== extDates[0].date;
+  // ONE panel, two modes driven by the date strip: LIVE (pmDate === undefined, the
+  // default on load) shows TODAY's live morning catalysts with auto-refresh; picking
+  // any past date switches this same panel to that session's extended-movers history.
+  // (Semantics are the explicit selection now — not "is the newest ext date shown",
+  // which made the live panel indistinguishable from just viewing today's date.)
+  const viewingPast = pmDate !== undefined;
   // ticker -> extended row, to fold pm/reg/ah into the latest-session ranking.
   const extByTicker: Record<string, ExtendedRow> = {};
   for (const r of extMovers) extByTicker[r.ticker] = r;
@@ -275,25 +279,29 @@ export default function CatalystsPage() {
         <section className="shrink-0 flex flex-col max-h-[45vh] overflow-hidden border-b border-tape-border">
           <div className="shrink-0 flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 tape-mono text-[10px] border-b border-tape-border bg-tape-panel-2">
             <span className="text-tape-muted tracking-[0.12em]">PREMARKET · morning panel</span>
-            {/* day calendar — browse past sessions (a past date shows that session's
-                extended movers; the morning ranking is retained for the latest only). */}
-            {extDates.length > 0 ? (
-              <select
-                value={ext?.date ?? ""}
-                onChange={(e) => setPmDate(e.target.value)}
-                className="bg-tape-panel border border-tape-border rounded px-1.5 py-0.5 text-[10px] text-tape-text cursor-pointer"
-                title="view a past session"
-                aria-label="session date"
-              >
-                {extDates.map((d) => (
+            {/* ONE selector: LIVE (default) shows today's live morning catalysts;
+                any past date switches this same panel to that session's extended
+                movers. LIVE is always present (even pre-market with no ext rows yet),
+                and today's live session is dropped from the dated options so it never
+                appears twice / ambiguously as both "LIVE" and a date. */}
+            <select
+              value={pmDate ?? "__LIVE__"}
+              onChange={(e) =>
+                setPmDate(e.target.value === "__LIVE__" ? undefined : e.target.value)
+              }
+              className="bg-tape-panel border border-tape-border rounded px-1.5 py-0.5 text-[10px] text-tape-text cursor-pointer"
+              title="LIVE = today's morning catalysts; pick a date for a past session"
+              aria-label="session date — LIVE or a past session"
+            >
+              <option value="__LIVE__">● LIVE — today</option>
+              {extDates
+                .filter((d) => d.date !== pm.session_date)
+                .map((d) => (
                   <option key={d.date} value={d.date}>
                     {d.label}
                   </option>
                 ))}
-              </select>
-            ) : (
-              pm.session_date && <span className="text-tape-sub">{pm.session_date}</span>
-            )}
+            </select>
             {viewingPast ? (
               <>
                 <span className="px-1.5 py-0.5 rounded border border-tape-border-soft text-tape-warn">
@@ -304,20 +312,29 @@ export default function CatalystsPage() {
                   onClick={() => setPmDate(undefined)}
                   className="text-tape-accent hover:underline"
                 >
-                  ← latest
+                  ← LIVE
                 </button>
               </>
             ) : (
               <>
+                {/* Persistent LIVE-mode marker: the panel is showing today's morning
+                    catalysts and auto-refreshes (60s). Shown whether or not the server
+                    did a pre-open live recompute, so post-open it never reads as "off". */}
+                <span
+                  className="text-tape-bull"
+                  title="today's live morning catalysts — auto-refreshes every 60s"
+                >
+                  ● LIVE
+                </span>
                 {pm.computed_at && (
                   <span className="text-tape-faint">computed {fmtET(pm.computed_at)}</span>
                 )}
                 {pm.live && (
                   <span
-                    className="text-tape-bull"
+                    className="text-tape-faint"
                     title="recomputed live on this fetch (premarket window open)"
                   >
-                    LIVE
+                    · recomputed
                   </span>
                 )}
                 {pm.stale && (
