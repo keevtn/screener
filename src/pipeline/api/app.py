@@ -1329,6 +1329,19 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
                 _resolve = _json.loads(_sp.read_text())
         except Exception:  # noqa: BLE001
             _resolve = None
+        # Last score-SWEEP outcome (scored count, or the exact traceback if the sweep
+        # threw). This is how a wedged score step is diagnosed without Railway logs.
+        _score_status: dict[str, Any] | None = None
+        try:
+            from pipeline.score.score import score_status_path
+
+            _ssp = score_status_path()
+            if _ssp.exists():
+                import json as _json2
+
+                _score_status = _json2.loads(_ssp.read_text())
+        except Exception:  # noqa: BLE001
+            _score_status = None
         # News-feed join diagnostic: the tape shows sentiment only when a raw_item is
         # the ORIGIN of a cluster that has a ClusterScore with a non-null finbert_score
         # (pipeline/aggregate/news.py). Replicate that exact join on the newest items so
@@ -1379,6 +1392,7 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
             "cluster_scores_recent": len(_recent),
             "finbert_scores_recent": sum(1 for s in _recent if s is not None),
             "finbert_resolve": _resolve,  # {mode, active, error, probe_score} or null
+            "score_sweep": _score_status,  # {scored, error} — last score_clusters outcome
             **_join,
         }
 

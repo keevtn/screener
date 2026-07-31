@@ -9,8 +9,12 @@ guidance language overrides results-level text direction.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
+import os
+import traceback
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -24,6 +28,24 @@ from pipeline.enrich.tiers import SourceTiers, load_source_tiers
 from pipeline.score.catalysts import CatalystTaxonomy, load_taxonomy
 
 log = logging.getLogger("pipeline.score")
+
+
+def score_status_path() -> Path:
+    """Where score_clusters records its last-sweep outcome so the read-only API can
+    surface it (exact traceback if the sweep threw) without Railway log access —
+    mirrors sentiment.finbert_status_path. This is how a wedged score step becomes
+    visible: /health shows scored count + the error string instead of a silent stall."""
+    return Path(os.environ.get("SCORE_STATUS_PATH", "data/score_status.json"))
+
+
+def _write_score_status(scored: int | None, error: str | None) -> None:
+    """Persist the last score-sweep outcome (best-effort; never raises)."""
+    try:
+        p = score_status_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"scored": scored, "error": error}))
+    except Exception:  # noqa: BLE001 — observability only, never break scoring
+        pass
 
 # FinBERT inference sub-batch. A whole 256-cluster chunk in ONE onnx call is a
 # large tensor (batch × 512 tokens) that can crash/OOM the score step on a small
@@ -214,43 +236,69 @@ def score_clusters(
     stmt = stmt.order_by(Cluster.created_at.desc())
     clusters = session.execute(stmt).scalars().all()
 
-    rows: list[tuple[str, CanonicalItem]] = []
-    for cl in clusters:
-        origin_row = session.get(RawItem, cl.origin_item_id)
-        if origin_row is not None:
-            rows.append((cl.cluster_id, from_raw_item(origin_row)))
-
     n = 0
-    for start in range(0, len(rows), batch_size):
-        chunk = rows[start : start + batch_size]
-        pairs = [(it.title, it.description) for _, it in chunk]
-        fb = _finbert_scores(finbert, pairs)
-        lm_r = _lm_scores(lm, pairs)
-        for (cluster_id, origin), f, lval in zip(chunk, fb, lm_r, strict=True):
-            sent = SentimentScores(
-                finbert_label=f.label if f is not None else None,
-                finbert_score=f.score if f is not None else None,
-                lm_score=lval.score if lval is not None else None,
-            )
-            # Per-cluster SAVEPOINT: a cluster whose taxonomy/persist throws rolls back
-            # JUST itself (not the whole 256-chunk) and still gets a row written, so
-            # only_unscored ADVANCES instead of re-selecting and re-wedging it every
-            # sweep. This is what unsticks scoring frozen at one batch.
+    try:
+        # Build (cluster_id, origin) rows, RESILIENT to a cluster whose origin is
+        # missing or can't be canonicalized. That from_raw_item() call used to run
+        # here UNGUARDED — one malformed origin threw BEFORE any scoring, aborting the
+        # whole sweep, and because only_unscored re-selects that cluster every sweep it
+        # wedged cluster_scores at one batch permanently. Now a bad origin gets a
+        # null-score row (so only_unscored advances) and every other cluster still scores.
+        rows: list[tuple[str, CanonicalItem]] = []
+        for cl in clusters:
             try:
-                with session.begin_nested():
-                    persist_cluster_score(
-                        session,
-                        _assemble_score(cluster_id, origin, sent, taxonomy=taxonomy, tiers=tiers),
-                    )
-            except Exception as exc:  # noqa: BLE001 — never wedge the sweep on one cluster
+                origin_row = session.get(RawItem, cl.origin_item_id)
+                if origin_row is None:
+                    raise ValueError(f"origin item {cl.origin_item_id!r} missing")
+                rows.append((cl.cluster_id, from_raw_item(origin_row)))
+            except Exception as exc:  # noqa: BLE001 — a bad origin must not wedge the sweep
                 log.warning(
-                    "scoring cluster %s failed (%r); writing a sentiment-only row so the "
-                    "sweep advances",
-                    cluster_id,
+                    "cluster %s origin uncanonicalizable (%r); null-score row so the sweep advances",
+                    cl.cluster_id,
                     exc,
                 )
                 with contextlib.suppress(Exception), session.begin_nested():
-                    persist_cluster_score(session, _fallback_score(cluster_id, sent))
-            n += 1
-        session.commit()
+                    persist_cluster_score(session, _fallback_score(cl.cluster_id, SentimentScores()))
+                n += 1
+        if n:
+            session.commit()  # flush the fallback rows for uncanonicalizable clusters
+
+        for start in range(0, len(rows), batch_size):
+            chunk = rows[start : start + batch_size]
+            pairs = [(it.title, it.description) for _, it in chunk]
+            fb = _finbert_scores(finbert, pairs)
+            lm_r = _lm_scores(lm, pairs)
+            for (cluster_id, origin), f, lval in zip(chunk, fb, lm_r, strict=True):
+                sent = SentimentScores(
+                    finbert_label=f.label if f is not None else None,
+                    finbert_score=f.score if f is not None else None,
+                    lm_score=lval.score if lval is not None else None,
+                )
+                # Per-cluster SAVEPOINT: a cluster whose taxonomy/persist throws rolls
+                # back JUST itself (not the whole 256-chunk) and still gets a row
+                # written, so only_unscored ADVANCES instead of re-selecting and
+                # re-wedging it every sweep.
+                try:
+                    with session.begin_nested():
+                        persist_cluster_score(
+                            session,
+                            _assemble_score(
+                                cluster_id, origin, sent, taxonomy=taxonomy, tiers=tiers
+                            ),
+                        )
+                except Exception as exc:  # noqa: BLE001 — never wedge the sweep on one cluster
+                    log.warning(
+                        "scoring cluster %s failed (%r); writing a sentiment-only row so the "
+                        "sweep advances",
+                        cluster_id,
+                        exc,
+                    )
+                    with contextlib.suppress(Exception), session.begin_nested():
+                        persist_cluster_score(session, _fallback_score(cluster_id, sent))
+                n += 1
+            session.commit()
+    except Exception:  # noqa: BLE001 — surface the EXACT failure to /health, then re-raise
+        _write_score_status(None, traceback.format_exc()[-1500:])
+        raise
+    _write_score_status(n, None)
     return n
