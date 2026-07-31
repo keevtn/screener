@@ -8,6 +8,7 @@ guidance language overrides results-level text direction.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -50,6 +51,26 @@ def _finbert_scores(finbert: Any, pairs: list[tuple[str, str]]) -> list[Any]:
             )
             out.extend([None] * len(sub))
     return out
+
+
+def _lm_scores(lm: Any, pairs: list[tuple[str, str]]) -> list[Any]:
+    """LM (Loughran–McDonald) over pairs in the same small sub-batches, resilient to a
+    batch-level failure. The LM call used to run over the WHOLE 256-cluster chunk
+    UNGUARDED — one bad row threw, aborted the chunk before its commit, and because
+    ``only_unscored`` re-selects the same clusters next sweep it WEDGED all scoring at
+    one batch permanently (observed on Railway: cluster_scores frozen at 256 while
+    clusters kept growing). Sub-batching + fallback removes that failure mode."""
+    if lm is None:
+        return [None] * len(pairs)
+    out: list[Any] = []
+    for i in range(0, len(pairs), _FINBERT_SUB_BATCH):
+        sub = pairs[i : i + _FINBERT_SUB_BATCH]
+        try:
+            out.extend(lm.analyze_text_batch(sub))
+        except Exception as exc:  # noqa: BLE001 — a bad batch must not wedge the sweep
+            log.warning("lm inference failed on %d rows (%r); null lm for these", len(sub), exc)
+            out.extend([None] * len(sub))
+    return out
 from pipeline.score.routing import text_kind_of
 from pipeline.score.sentiment import SentimentScores, score_sentiment
 
@@ -68,6 +89,26 @@ class ClusterScoreValues:
     high_alert: bool
     predictive: bool
     reaction_dependent: bool
+
+
+def _fallback_score(cluster_id: str, sent: SentimentScores) -> ClusterScoreValues:
+    """Minimal row for a cluster whose _assemble_score/persist threw, so only_unscored
+    ADVANCES past it instead of re-selecting (and re-wedging) it every sweep. Keeps the
+    sentiment we already computed — drops only the catalyst-taxonomy overlay."""
+    return ClusterScoreValues(
+        cluster_id=cluster_id,
+        finbert_label=sent.finbert_label,
+        finbert_score=sent.finbert_score,
+        lm_score=sent.lm_score,
+        text_kind="unknown",
+        catalyst_type=None,
+        event_stage=None,
+        materiality=0.0,
+        direction_hint=None,
+        high_alert=False,
+        predictive=True,
+        reaction_dependent=False,
+    )
 
 
 def _assemble_score(
@@ -166,6 +207,11 @@ def score_clusters(
         stmt = stmt.outerjoin(ClusterScore, ClusterScore.cluster_id == Cluster.cluster_id).where(
             ClusterScore.cluster_id.is_(None)
         )
+    # NEWEST cluster first: the tape/feed renders newest-first, and a single sweep may
+    # not drain a large unscored backlog — so score what users actually SEE first,
+    # instead of the old rowid (oldest-first) order that left recent clusters (the
+    # visible tape) unscored behind the archive. Full-rescore passes are unaffected.
+    stmt = stmt.order_by(Cluster.created_at.desc())
     clusters = session.execute(stmt).scalars().all()
 
     rows: list[tuple[str, CanonicalItem]] = []
@@ -179,16 +225,32 @@ def score_clusters(
         chunk = rows[start : start + batch_size]
         pairs = [(it.title, it.description) for _, it in chunk]
         fb = _finbert_scores(finbert, pairs)
-        lm_r = lm.analyze_text_batch(pairs) if lm is not None else [None] * len(pairs)
+        lm_r = _lm_scores(lm, pairs)
         for (cluster_id, origin), f, lval in zip(chunk, fb, lm_r, strict=True):
             sent = SentimentScores(
                 finbert_label=f.label if f is not None else None,
                 finbert_score=f.score if f is not None else None,
                 lm_score=lval.score if lval is not None else None,
             )
-            persist_cluster_score(
-                session, _assemble_score(cluster_id, origin, sent, taxonomy=taxonomy, tiers=tiers)
-            )
+            # Per-cluster SAVEPOINT: a cluster whose taxonomy/persist throws rolls back
+            # JUST itself (not the whole 256-chunk) and still gets a row written, so
+            # only_unscored ADVANCES instead of re-selecting and re-wedging it every
+            # sweep. This is what unsticks scoring frozen at one batch.
+            try:
+                with session.begin_nested():
+                    persist_cluster_score(
+                        session,
+                        _assemble_score(cluster_id, origin, sent, taxonomy=taxonomy, tiers=tiers),
+                    )
+            except Exception as exc:  # noqa: BLE001 — never wedge the sweep on one cluster
+                log.warning(
+                    "scoring cluster %s failed (%r); writing a sentiment-only row so the "
+                    "sweep advances",
+                    cluster_id,
+                    exc,
+                )
+                with contextlib.suppress(Exception), session.begin_nested():
+                    persist_cluster_score(session, _fallback_score(cluster_id, sent))
             n += 1
         session.commit()
     return n
