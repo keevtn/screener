@@ -106,6 +106,55 @@ npm run dev      # http://localhost:3000
 FinBERT needs ~440 MB RAM; `--no-finbert` scores with the lexicon only (low-RAM,
 CI, and small deploy instances).
 
+> The frontend defaults to the **localhost:8001** API with no env at all
+> (`frontend/src/lib/config.ts`) — the `.env.local` lines above are only needed to
+> point it at a *different* backend.
+
+### Windows: one-command dev (`start.ps1`)
+
+On Windows there's a launcher at the repo root that brings the whole stack up in
+three supervised windows (API + pipeline + frontend), each restart-on-crash and
+teeing to `logs\<svc>_<date>.log`.
+
+```powershell
+# one-time setup
+python -m venv .venv
+.\.venv\Scripts\python -m pip install -r requirements.txt
+cd frontend; npm install; cd ..
+# optional: copy the docs/ENVIRONMENT.md template block to .env to enable
+# Alpaca / LLM / onnx. The stack runs fine with NO .env (SQLite + lexicon).
+
+# launch
+.\start.ps1                 # API (:8001) + pipeline (lexicon) + frontend (:3000)
+.\start.ps1 -FinBERT        # score with FinBERT instead of the lexicon
+.\start.ps1 -Trader         # ALSO run the local paper driver (see the warning below)
+.\start.ps1 -Stop           # stop whatever start.ps1 launched
+```
+
+Then open:
+
+- **http://localhost:3000** — the dashboard
+- **http://127.0.0.1:8001/health** — API health (scoring / mount / driver blocks)
+- **http://127.0.0.1:8001/docs** — API docs
+
+It runs preflight checks first (venv, `frontend/node_modules`, a soft `.env`
+warning, and port-in-use warnings for 8001/3000) and prints the create/install
+commands if anything's missing.
+
+**Sentiment mode locally:** the pipeline defaults to the zero-dependency **Loughran–McDonald
+lexicon** (no ML stack, low RAM). To upgrade: (a) set `SENTIMENT_MODE=onnx` in
+`.env` and download the quantized model once with
+[`scripts/fetch_model.py`](scripts/fetch_model.py), then `.\start.ps1 -FinBERT`; or
+(b) install the ML stack (`pip install torch transformers`) and run
+`.\start.ps1 -FinBERT` for native torch FinBERT.
+
+> **⚠ One driver per Alpaca account.** `-Trader` launches the local paper driver.
+> The **cloud** driver on Railway is live for the shared paper account — running a
+> second driver against the **same** account double-places orders. Only use
+> `-Trader` if this machine's `ALPACA_*` keys point at an account no other driver is
+> trading. Without `-Trader` (the default) the local stack is strictly read-only
+> toward Alpaca.
+
 ## Deploy to Railway
 
 Two services from this one repo, sharing nothing but the public API URL. The app
