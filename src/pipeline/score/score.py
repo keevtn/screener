@@ -52,7 +52,15 @@ def _write_score_status(scored: int | None, error: str | None) -> None:
 # instance — the single-text self-test never hits it, so the failure is silent
 # and zeroes ALL cluster_scores (observed on Railway 2026-07-30). Running FinBERT
 # in small sub-batches bounds peak memory and localizes any failure.
-_FINBERT_SUB_BATCH = 16
+_FINBERT_SUB_BATCH = 8
+
+# Max clusters scored PER SWEEP (newest-first). On the throttled Railway shared CPU
+# with intra_op_num_threads=1, a full backlog batch (256) of onnx inferences stalls
+# for >10 min and never commits (observed 2026-07-31: score step frozen at
+# "batch 0 -> finbert"). Bounding the per-sweep volume keeps each score step short
+# so it COMMITS, and — newest-first — the visible tape fills within a sweep or two;
+# the deep backlog drains across sweeps. Env-tunable once we know the box's headroom.
+_MAX_PER_SWEEP = int(os.environ.get("FINBERT_MAX_PER_SWEEP", "48") or "48")
 
 
 def _finbert_scores(finbert: Any, pairs: list[tuple[str, str]]) -> list[Any]:
@@ -65,6 +73,9 @@ def _finbert_scores(finbert: Any, pairs: list[tuple[str, str]]) -> list[Any]:
     out: list[Any] = []
     for i in range(0, len(pairs), _FINBERT_SUB_BATCH):
         sub = pairs[i : i + _FINBERT_SUB_BATCH]
+        # Breadcrumb per sub-batch: if onnx TRULY hangs on one pathological input
+        # (a hang isn't catchable), the last status pins it to these ≤8 clusters.
+        _write_score_status(-7, f"v8:finbert sub {i}..{i + len(sub)}/{len(pairs)}")
         try:
             out.extend(finbert.analyze_text_batch(sub))
         except Exception as exc:  # noqa: BLE001 — a bad batch must not zero the sweep
@@ -236,8 +247,12 @@ def score_clusters(
         # first, instead of the old rowid (oldest-first) order that left recent clusters
         # (the visible tape) unscored behind the archive. Full-rescore is unaffected.
         stmt = stmt.order_by(Cluster.created_at.desc())
+        # Cap per-sweep volume so the onnx score step COMPLETES on the throttled box
+        # (only for incremental sweeps; a full --rescore-all pass is uncapped).
+        if only_unscored and _MAX_PER_SWEEP > 0:
+            stmt = stmt.limit(_MAX_PER_SWEEP)
         clusters = session.execute(stmt).scalars().all()
-        _write_score_status(-2, f"v7:queried {len(clusters)} unscored clusters")
+        _write_score_status(-2, f"v8:queried {len(clusters)} unscored (cap {_MAX_PER_SWEEP})")
 
         # Build (cluster_id, origin) rows, RESILIENT to a cluster whose origin is
         # missing or can't be canonicalized. That from_raw_item() call used to run
