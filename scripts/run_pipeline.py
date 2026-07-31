@@ -154,7 +154,23 @@ def run_cycle(
             # clusters x FinBERT) — ~10 min at 9K clusters, unbounded as the
             # archive grows. Taxonomy/config edits now require an explicit
             # `--rescore-all` pass to propagate to existing scores.
-            n = score_clusters(s, finbert=finbert, lm=lm, only_unscored=not rescore_all)
+            #
+            # BREADCRUMB (v6): write status BEFORE the call so /health can localize a
+            # score step that neither completes nor raises catchably (a hang/OOM inside
+            # score_clusters bypasses its own status write). score_clusters overwrites
+            # this with {scored,error} on completion; an except here captures a failure
+            # in the CALL/args path that score_clusters' internal try can't see.
+            from pipeline.score.score import _write_score_status
+
+            _write_score_status(-1, "v6:ENTERED score_clusters (finbert=%s lm=%s)"
+                                % (finbert is not None, lm is not None))
+            try:
+                n = score_clusters(s, finbert=finbert, lm=lm, only_unscored=not rescore_all)
+            except Exception:
+                import traceback as _tb
+
+                _write_score_status(None, "v6:RAISED in _score: " + _tb.format_exc()[-1300:])
+                raise
             if n:
                 publish_event("fired", count=n)  # newly scored clusters -> CATALYSTS refresh
             return f"{n} scored"
