@@ -462,19 +462,10 @@ DEFAULT_RSS_FEEDS: list[dict[str, str]] = [
         "url": "https://www.investing.com/rss/news.rss",
     },
     {
-        # Reuters retired its official public RSS (reutersagency.com/feed is a dead
-        # 301); this is the Google-News RSS PROXY scoped to Reuters markets/business
-        # — AGGREGATOR-proxied, not an official Reuters feed. Verified live
-        # 2026-07-31: 100 entries, every one with a stable guid + title + timestamp
-        # (real finance headlines; links are Google redirect URLs that resolve to
-        # reuters.com). Named honestly so it never reads as a first-party wire.
-        "label": "Reuters (Google News)",
-        "url": "https://news.google.com/rss/search?q=(site:reuters.com/markets%20OR%20site:reuters.com/business)%20when:3d&hl=en-US&gl=US&ceid=US:en",
-    },
-    {
-        # Interactive Brokers Traders' Insight / IBKR Campus — market commentary,
-        # macro/econ notes, prediction-market reads. Verified live 2026-07-31:
-        # 20 entries, all with guid + title + timestamp, fresh (same-day).
+        # Interactive Brokers Traders' Insight / IBKR Campus — first-party, free,
+        # public RSS: market commentary, macro/econ notes, prediction-market reads.
+        # Verified live 2026-07-31: 20 entries, all with guid + title + clean
+        # first-party url + timestamp, fresh (same-day), 200 under the contact UA.
         "label": "IBKR Traders' Insight",
         "url": "https://www.interactivebrokers.com/campus/feed/",
     },
