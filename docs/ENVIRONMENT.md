@@ -17,7 +17,9 @@ dev (`.env` is gitignored — never commit real secrets). On Railway, set these 
 
 | Var | Default | Notes |
 |-----|---------|-------|
-| `DATABASE_URL` | `sqlite:///data/pipeline.db` | SQLAlchemy URL for the one SQLite DB shared by the pipeline loop and the API. On Railway point at the mounted volume with **four** slashes (absolute): `sqlite:////data/pipeline.db`. |
+| `DATABASE_URL` | `sqlite:///data/pipeline.db` | SQLAlchemy URL for the one SQLite DB shared by the pipeline loop and the API. On Railway mount the volume at **`/app/data`** and point here with **four** slashes (absolute): `sqlite:////app/data/pipeline.db`. |
+| `RAILWAY_VOLUME_MOUNT_PATH` | *(injected)* | Set by Railway to the volume mount path (`/app/data`). Read-only signal the volume guard cross-checks against where the DB actually lands — you never set this yourself. |
+| `SEED_DB_URL` / `SEED_DB_PATH` | `seed/pipeline_seed.db` | Override the source the per-table seed hydrator copies demo history from (see `scripts/hydrate_seed.py`). |
 
 ## Web process (app service)
 
@@ -25,7 +27,9 @@ dev (`.env` is gitignored — never commit real secrets). On Railway, set these 
 |-----|---------|-------|
 | `PORT` | `8001` | Injected by Railway; the API binds it. |
 | `HOST` | `127.0.0.1` | The Railway start script sets `0.0.0.0`. |
-| `PIPELINE_INTERVAL` | `300` | Full-sweep cadence (s); the fast sweep is a fraction of it. |
+| `PIPELINE_INTERVAL` | `300` | Full-sweep cadence in seconds (baselines, grading, attention rollup). |
+| `PIPELINE_FAST_INTERVAL` | *(fraction of full)* | Fast deterministic sweep cadence (ingest → enrich → score → signal) for freshness. |
+| `API_CORS_ORIGINS` | `*` | Comma-separated allowed CORS origins for the API. Default `*` (valid because the API sets no credentials); pin to the exact frontend domain(s) to lock down. |
 
 ## Frontend (NEXT_PUBLIC_* — build-time)
 
@@ -47,6 +51,21 @@ RANK / deep-dive panels.
 | `AGENT_DAILY_USD_CAP` | `2.0` | Soft USD/day cap before a run refuses to start. |
 | `AGENT_RANKER_CANDIDATES` | `40` | Candidate breadth per ranking run. |
 
+## Sentiment scoring — optional
+
+Default is the zero-dependency Loughran–McDonald lexicon. ONNX turns on an
+int8-quantized ProsusAI/finbert that runs in-process (no torch/transformers, no
+external inference API — the model is a static file downloaded to the volume once
+at boot, checksum-verified). Missing model/deps → **automatic lexicon fallback**.
+
+| Var | Default | Notes |
+|-----|---------|-------|
+| `SENTIMENT_MODE` | `lexicon` | `lexicon` or `onnx`. Surfaced in `/health` → `scoring.sentiment_mode`. |
+| `FINBERT_ONNX_URL` | — | Static download URL for `model.int8.onnx` (a GitHub Release asset or HuggingFace resolve URL — *not* an inference API). |
+| `FINBERT_ONNX_SHA256` | — | Optional integrity check; on mismatch the file is discarded → lexicon fallback. |
+| `FINBERT_ONNX_PATH` | `/app/data/models/finbert-int8.onnx` | Where the model caches on the volume across restarts. |
+| `FINBERT_MAX_PER_SWEEP` / `FINBERT_ONNX_THREADS` | — | Advanced tuning: cap FinBERT scores per sweep / ORT thread count. |
+
 ## Market data + sim — optional
 
 | Var | Default | Notes |
@@ -55,6 +74,7 @@ RANK / deep-dive panels.
 | `SIM_ENABLED` | `false` | Arm the in-pipeline paper-sim step (`run_pipeline`). Does NOT gate the standing driver (that's `TRADER_DRIVER_ENABLED`). |
 | `TRADER_DRIVER_ENABLED` | `false` | **Master switch for LIVE paper trading on Railway.** When true, the app service runs the standing daily driver (`scripts/run_trader.py`) alongside the API + pipeline: arm one session per trading day off the Alpaca clock, sweep entries/exits, flatten ~10 min before the close, write the EOD report card. Order placement lives only in this driver's clock loop. Default off = zero behavior change. **Disable trading instantly: unset this and restart the service.** ⚠ **Exactly one driver may trade a paper account** — if Railway trades, the local driver for this account MUST stay off (see README). |
 | `TRADER_DRIVER_SWEEP_S` | `60` | Seconds between driver sweeps (entry/exit evaluation). Min 5. |
+| `TRADER_VOLUME_GUARD` | `on` | **Emergency operator kill-switch only.** By default the pipeline/driver refuse to run if the DB isn't on a persistent Railway volume (so a mis-mounted deploy can't accumulate data that vanishes on restart). Setting it to `off` **bypasses that persistence check** — intended solely for a deliberate ephemeral/debug run. Leave it on in production. |
 | `FINVIZ_AUTH_TOKEN` | — | Primary universe/fundamentals provider; absent → free Nasdaq directory fallback. |
 
 ## Ingestion identity + social — optional but polite
@@ -77,13 +97,23 @@ RANK / deep-dive panels.
 ## Copy-paste template
 
 ```dotenv
-# Storage — on Railway use sqlite:////data/pipeline.db (four slashes, on the volume)
+# Storage — on Railway mount the volume at /app/data and use four slashes (absolute):
+#   DATABASE_URL=sqlite:////app/data/pipeline.db
 DATABASE_URL=sqlite:///data/pipeline.db
+# SEED_DB_URL=            # override the per-table seed source (default seed/pipeline_seed.db)
 
 # Web process (Railway injects PORT and sets HOST=0.0.0.0; leave unset locally)
 # PORT=8001
 # HOST=0.0.0.0
 # PIPELINE_INTERVAL=300
+# PIPELINE_FAST_INTERVAL=
+# API_CORS_ORIGINS=*      # pin to the frontend domain(s) to lock down
+
+# Sentiment — optional (default lexicon; onnx runs int8 FinBERT in-process)
+# SENTIMENT_MODE=lexicon
+# FINBERT_ONNX_URL=
+# FINBERT_ONNX_SHA256=
+# FINBERT_ONNX_PATH=/app/data/models/finbert-int8.onnx
 
 # Frontend (set on the FRONTEND service — baked at build time)
 NEXT_PUBLIC_API_URL=http://localhost:8001
@@ -100,6 +130,9 @@ NEXT_PUBLIC_PREDICTION_API_URL=http://localhost:8001
 # ALPACA_API_KEY=
 # ALPACA_API_SECRET=
 # SIM_ENABLED=false
+# TRADER_DRIVER_ENABLED=false   # master switch for the standing paper driver (Railway)
+# TRADER_DRIVER_SWEEP_S=60
+# TRADER_VOLUME_GUARD=on        # emergency kill-switch only; leave on in production
 # FINVIZ_AUTH_TOKEN=
 
 # Ingestion identity + social — optional

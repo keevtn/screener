@@ -21,13 +21,23 @@ signal path never depends on the LLM.
 
 | Page | What it shows |
 |------|---------------|
-| **Home** (`/`) | Live news tape (RSS/SEC/FDA/social), morning premarket panel, day calendar |
+| **Home** (`/`) | Live news tape (RSS/SEC/FDA/social), morning premarket panel with a LIVE / past-date selector, day calendar |
 | **Screener** (`/screener`) | Signal-ranked tickers with numeric VOL / market-cap columns + a filter bar |
 | **Universe** (`/universe`) | Finviz-style fundamentals screen over the tradeable universe |
-| **Catalysts** (`/catalysts`) | FIRED (24h/48h/1W), scheduled, and premarket catalyst boards |
-| **Ticker** (`/ticker/[t]`) | Price + intraday bars, news-density curve, cluster history, sim bars |
+| **Catalysts** (`/catalysts`) | FIRED (24h/48h/1W), scheduled, and a live premarket morning-catalyst panel |
+| **Ticker** (`/ticker/[t]`) | Price + intraday bars, news-density + attention charts, cluster history, sim bars, this account's entry/exit fill markers |
+| **Trader** (`/trader`) | **Read-only** paper-account dashboard: account header + equity curve, positions & FIFO round-trip blotter each joined to the originating catalyst headline (provenance), P&L calendar + day report cards, a catalyst watchlist, and driver-liveness |
 | **Rank** (`/rank`) | LLM ranker proposals (force-run, model-selectable) + spend accounting |
-| **Ledger / Eval / Config** | Paper-trade ledger, prediction grading (IC/CAR), versioned config with approvals |
+| **Ledger / Eval / Config** | Prediction ledger with origin-news lanes (structured/social) and a reals-vs-baselines toggle, prediction grading (IC/CAR), versioned config with approvals |
+
+### Notable features
+
+- **TRADER panel** — a strictly read-only web view of the Alpaca **paper** book. Every closed round-trip is FIFO-paired from real fills and joined back to the sim trade → cluster → origin headline, so the blotter answers "the agent bought AAPL at 9:47 — *here's the headline that caused it*." Keys never reach the browser.
+- **Autonomous cloud driver + exit-policy A/B** — an optional standing driver (off by default) arms one paper session per trading day off the Alpaca clock and runs enabled configs, including a live A/B of a `vol_stop` exit against the `horizon_hold` baseline. Order placement lives only in the driver's clock loop; no HTTP route can trade.
+- **LEDGER origin-news + baselines** — every prediction carries its originating source_class / headline / url via a companion table; the ledger defaults to real signals with a one-click **BASELINES** toggle for the always_up/random/momentum shadows.
+- **Accessibility** — a WCAG 2.1 AA axe harness (`npm run a11y`) scans every route; the audited terminal went **462 → 0** critical+serious violations (see [`docs/ada_compliance.md`](docs/ada_compliance.md)).
+- **Ingestion roster** — RSS wires (Bloomberg, CNBC, MarketWatch, Seeking Alpha, PR Newswire, GlobeNewswire, Nasdaq, **IBKR Traders' Insight**, …), SEC EDGAR + FDA extractors, and social lanes (Reddit multi-subreddit + Bluesky firehose). StockTwits has been retired.
+- **~500 tests** (unit + integration, SQLite fixtures, no network) guard the invariants.
 
 ## Architecture at a glance
 
@@ -108,11 +118,13 @@ frontend is a standalone Next.js service.
 2. Service **Settings → Root Directory** = `/` (repo root). The root
    [`railway.json`](railway.json) sets the Nixpacks build, the start command
    (`bash scripts/railway_start.sh`), and the `/health` healthcheck.
-3. **Settings → Volumes → Add Volume**, mount path `/data`.
-4. **Variables**: `DATABASE_URL=sqlite:////data/pipeline.db` (four slashes = absolute,
-   on the volume). Add any optional keys from
+3. **Settings → Volumes → Add Volume**, mount path **`/app/data`** (the service
+   runs with the repo root as its working directory, so the DB lands on the volume).
+4. **Variables**: `DATABASE_URL=sqlite:////app/data/pipeline.db` (four slashes =
+   absolute path on the volume). Add any optional keys from
    [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) (`ANTHROPIC_API_KEY`, `ALPACA_*`, …).
-   `PORT`/`HOST` are injected automatically.
+   `PORT`/`HOST` are injected automatically; Railway also injects
+   `RAILWAY_VOLUME_MOUNT_PATH`, which the volume guard cross-checks.
    - **TRADER view (paper account):** set `ALPACA_API_KEY` and `ALPACA_API_SECRET`
      (names only — paste your **paper** account values in the Railway UI, never in
      git) on **this app service**. They power the read-only `/trader/*` endpoints
@@ -120,18 +132,34 @@ frontend is a standalone Next.js service.
      sim paths. Without them the deployed TRADER tab renders a "connect Alpaca
      keys" empty state instead of crashing. All Alpaca access is paper-only and
      read-only in the web backend; keys never reach the browser.
-5. Deploy. On boot the start script runs `init_db`, **hydrates the demo history**
-   from the committed seed if the volume is empty
-   ([`scripts/hydrate_seed.py`](scripts/hydrate_seed.py)), then in the background
-   fetches the FinBERT model (only if onnx is on), seeds entities/universe, and
-   starts the pipeline loop — serving the API in the foreground the whole time.
+5. Deploy. [`scripts/railway_start.sh`](scripts/railway_start.sh) is **API-first and
+   supervised** (hardened after a boot-blocking incident): `serve_api` binds `$PORT`
+   **first** so the `/health` healthcheck passes in seconds and cutovers complete
+   cleanly; only then does a **bootstrap** phase run — wait-for-writable-volume →
+   `init_db` → `hydrate_seed` → assign exit policies → fetch model → seed
+   entities/universe — each step under a **hard timeout** with isolated failure
+   (a hung step is killed and boot continues). Finally the **workers** (pipeline,
+   and the driver if enabled) launch **supervised**: a worker that dies is relaunched
+   with capped backoff and a loud `[boot]` line — never silently. Every stage prints
+   a `[boot]` marker.
 
-> **Demo history is seeded automatically.** A fresh volume starts empty, so
-> `seed/pipeline_seed.db` (a slim ~28 MB extract — prediction ledger, graded
-> outcomes, attention history, universe, paper-trading report cards; the bulk news
-> archive is excluded and re-accumulates live) is copied in on first boot. It is
-> idempotent: once the ledger has rows, restarts skip it. Refresh it before a push
-> with `python scripts/export_seed.py --source path/to/pipeline.db`.
+> **Demo history is seeded automatically, per table.**
+> [`scripts/hydrate_seed.py`](scripts/hydrate_seed.py) copies `seed/pipeline_seed.db`
+> (a slim extract — prediction ledger, graded outcomes, attention history, universe,
+> paper-trading report cards; the bulk news archive is excluded and re-accumulates
+> live) into the volume DB. Seeding is gated **per table on emptiness** — each table
+> is filled only if it's empty, so a table that has since accumulated live rows is
+> never clobbered, and a table added after the seed was built still fills on the next
+> boot. Copy is column-name-matched (not positional), so it survives schema drift.
+> Refresh the seed before a push with
+> `python scripts/export_seed.py --source path/to/pipeline.db`.
+
+> **Health = the operational source of truth.** `GET /health` returns, alongside
+> ingest staleness, three diagnostic blocks: **scoring** (`sentiment_mode`, a FinBERT
+> resolve/self-test, and `finbert_scores_recent` — nonzero proves FinBERT is actually
+> producing scores, not silently degraded to the lexicon), **mount** (does the DB
+> land on the mounted volume — answered from live `st_dev` truth, not trust), and the
+> paper-**driver** liveness via `GET /trader/driver`.
 
 **2 — Frontend service (Next.js)**
 1. In the same project → **New → GitHub repo** (same repo) → a second service.
@@ -241,7 +269,7 @@ uncommented if you followed the enable step) and set these app-service Variables
 SENTIMENT_MODE=onnx
 FINBERT_ONNX_URL=<the download URL from step b>
 FINBERT_ONNX_SHA256=<the hash printed in step a>
-FINBERT_ONNX_PATH=/data/models/finbert-int8.onnx   # on the volume, so it caches across restarts
+FINBERT_ONNX_PATH=/app/data/models/finbert-int8.onnx   # on the volume, so it caches across restarts
 ```
 
 If the model or its deps are ever missing, scoring **automatically falls back to the
@@ -251,7 +279,8 @@ the deploy.
 ## Testing
 
 ```bash
-pytest                 # full suite (network-marked tests are excluded by default)
+pytest                 # ~500 unit + integration tests (network-marked excluded by default)
+cd frontend && npm run a11y   # WCAG 2.1 AA axe scan over every route (exit code = critical+serious)
 ```
 
 ## Repository layout
@@ -259,11 +288,15 @@ pytest                 # full suite (network-marked tests are excluded by defaul
 ```
 src/pipeline/      ingest · enrich · score · signal · grade · aggregate · agents · api · sim
 backend/           legacy RSS/SEC/social extractors the pipeline dispatches into
-frontend/          Next.js dashboard
-scripts/           runnable entrypoints (init_db, run_pipeline, serve_api, railway_start.sh, …)
+frontend/          Next.js dashboard (+ a11y/ WCAG scanner)
+scripts/           entrypoints — run_pipeline.py (news loop) · run_trader.py (standing
+                   paper driver) · serve_api.py (read-only API) · railway_start.sh
+                   (API-first supervised boot) · init_db.py · hydrate_seed.py /
+                   export_seed.py (per-table seed) · export_finbert_onnx.py /
+                   fetch_model.py (quantized-FinBERT export + boot download)
 configs/           YAML: universe, catalysts, presets, source tiers, aliases, watchlist
-tests/             unit + integration (SQLite fixtures, no network)
-docs/              ARCHITECTURE.md · ENVIRONMENT.md
+tests/             ~500 unit + integration (SQLite fixtures, no network)
+docs/              ARCHITECTURE.md · ENVIRONMENT.md · ada_compliance.md
 ```
 
 ## License
