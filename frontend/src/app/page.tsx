@@ -221,7 +221,7 @@ export default function LivePage() {
           ))}
         </div>
         <span className="text-tape-faint">
-          {lane === "structured" ? "RSS · SEC · FDA" : "Reddit · StockTwits · Bluesky"}
+          {lane === "structured" ? "RSS · SEC · FDA" : "Reddit · Bluesky"}
         </span>
         <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-2">
           <TapeFilterCombo

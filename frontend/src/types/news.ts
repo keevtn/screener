@@ -29,7 +29,7 @@ export interface FilterState {
   topics: Set<string>;
   /** Structured panel: which of rss/sec/fda to show. */
   sourceTypes: Set<SourceType>;
-  /** Social panel: which platforms (Reddit/StockTwits/Bluesky/Other) to show. */
+  /** Social panel: which platforms (Reddit/Bluesky/Other) to show. */
   platforms: Set<string>;
   sentiments: Set<SentimentLabel>;
   /** Feed labels (NewsItem.source) to include; empty set = all feeds. */
