@@ -237,6 +237,7 @@ def score_clusters(
         # (the visible tape) unscored behind the archive. Full-rescore is unaffected.
         stmt = stmt.order_by(Cluster.created_at.desc())
         clusters = session.execute(stmt).scalars().all()
+        _write_score_status(-2, f"v7:queried {len(clusters)} unscored clusters")
 
         # Build (cluster_id, origin) rows, RESILIENT to a cluster whose origin is
         # missing or can't be canonicalized. That from_raw_item() call used to run
@@ -262,12 +263,15 @@ def score_clusters(
                 n += 1
         if n:
             session.commit()  # flush the fallback rows for uncanonicalizable clusters
+        _write_score_status(-3, f"v7:built {len(rows)} rows (n={n} fallbacks); scoring")
 
         for start in range(0, len(rows), batch_size):
             chunk = rows[start : start + batch_size]
             pairs = [(it.title, it.description) for _, it in chunk]
+            _write_score_status(-4, f"v7:batch {start}..{start + len(chunk)} -> finbert")
             fb = _finbert_scores(finbert, pairs)
             lm_r = _lm_scores(lm, pairs)
+            _write_score_status(-5, f"v7:batch {start} scored; persisting {len(chunk)}")
             for (cluster_id, origin), f, lval in zip(chunk, fb, lm_r, strict=True):
                 sent = SentimentScores(
                     finbert_label=f.label if f is not None else None,
@@ -296,6 +300,7 @@ def score_clusters(
                     with contextlib.suppress(Exception), session.begin_nested():
                         persist_cluster_score(session, _fallback_score(cluster_id, sent))
                 n += 1
+            _write_score_status(-6, f"v7:batch {start} committing (n={n})")
             session.commit()
     except Exception:  # noqa: BLE001 — surface the EXACT failure to /health, then re-raise
         _write_score_status(None, traceback.format_exc()[-1500:])
