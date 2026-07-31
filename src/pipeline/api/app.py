@@ -178,6 +178,10 @@ class HealthOut(BaseModel):
     # load-bearing field is finbert_scores_recent: if 0 while clusters are scoring,
     # FinBERT is NOT producing scores no matter what the env says.
     scoring: dict[str, Any] | None = None
+    # Mount diagnostics — pins WHERE the DB lands vs WHERE the volume mounts, so a
+    # persistence mismatch (DB on ephemeral /app/data while the volume is at /data)
+    # is a single unambiguous read. Read-only; fail-soft to null.
+    mount: dict[str, Any] | None = None
 
 
 class RankingItemOut(BaseModel):
@@ -1334,6 +1338,80 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
             "finbert_resolve": _resolve,  # {mode, active, error, probe_score} or null
         }
 
+        # --- mount diagnostics -------------------------------------------------
+        # Answer, from live truth: does the DB land on the mounted volume, or on the
+        # ephemeral overlay? Model mtime/age is the tell — a model that RE-DOWNLOADS
+        # each boot (age ≈ container uptime) means its path isn't persisted either;
+        # a model that SURVIVES (age ≫ uptime) proves that path IS the volume.
+        mount: dict[str, Any] | None = None
+        try:
+            import time as _time
+
+            from pipeline.common.db import database_url as _dburl
+            from pipeline.common.volume import _sqlite_file as _sqlfile
+            from pipeline.common.volume import sqlite_dir as _sqldir
+            from pipeline.common.volume import volume_status as _vstat
+
+            def _dev(p: str | None) -> int | None:
+                try:
+                    return _os.stat(p).st_dev if p else None
+                except OSError:
+                    return None
+
+            def _age(p: str | None) -> tuple[float | None, float | None]:
+                try:
+                    if p and _os.path.exists(p):
+                        mt = _os.stat(p).st_mtime
+                        return mt, round(_time.time() - mt, 1)
+                except OSError:
+                    pass
+                return None, None
+
+            _db_url = _dburl()
+            _db_dir = _sqldir(_db_url)
+            _db_file = _sqlfile(_db_url)
+            _mount_env = _os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+            _vs = _vstat(_db_url)
+            _root_dev = _dev("/")
+            _db_dev = _dev(_db_dir)
+            _mnt_dev = _dev(_mount_env)
+            _mdl_dir_dev = _dev(str(_Path(_model_path).parent))
+            _db_mt, _db_age = _age(_db_file)
+            _mdl_mt, _mdl_age = _age(_model_path)
+            mount = {
+                # where the app WRITES the DB
+                "database_url": _db_url,
+                "db_dir_resolved": _db_dir,
+                "db_file": _db_file,
+                "db_file_age_seconds": _db_age,
+                # where the volume MOUNTS
+                "railway_volume_mount_path": _mount_env,
+                "db_dir_under_mount": _vs.get("mount_confirmed"),
+                # verdicts
+                "data_beyond_seed": _vs.get("beyond_seed"),
+                "volume_ok": _vs.get("ok"),
+                "volume_reason": _vs.get("reason"),
+                # device comparison: a real mount is a different st_dev than '/'
+                "st_dev": {
+                    "root": _root_dev,
+                    "db_dir": _db_dev,
+                    "mount_path": _mnt_dev,
+                    "model_dir": _mdl_dir_dev,
+                    "db_on_separate_device": _db_dev is not None
+                    and _root_dev is not None
+                    and _db_dev != _root_dev,
+                    "model_on_separate_device": _mdl_dir_dev is not None
+                    and _root_dev is not None
+                    and _mdl_dir_dev != _root_dev,
+                },
+                # model persistence tell: age ≫ container uptime => path survived a deploy
+                "model_path": _model_path,
+                "model_present": _Path(_model_path).exists(),
+                "model_age_seconds": _mdl_age,
+            }
+        except Exception:  # noqa: BLE001 — diagnostics must never 500 /health
+            mount = None
+
         return HealthOut(
             now=now,
             raw_items=session.execute(select(func.count()).select_from(RawItem)).scalar_one(),
@@ -1344,6 +1422,7 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
             per_source_class=per_class,
             firehose=liveness(read_status(DEFAULT_STATUS_PATH)),
             scoring=scoring,
+            mount=mount,
         )
 
     # --- signal lab (5c.4): clean-only + holdout-excluded + backfill-excluded by default ---
