@@ -222,22 +222,22 @@ def score_clusters(
     is reserved for explicit `run_pipeline.py --rescore-all` runs after a
     taxonomy/config change.
     """
-    taxonomy = taxonomy or load_taxonomy()
-    tiers = tiers or load_source_tiers()
-    stmt = select(Cluster)
-    if only_unscored:
-        stmt = stmt.outerjoin(ClusterScore, ClusterScore.cluster_id == Cluster.cluster_id).where(
-            ClusterScore.cluster_id.is_(None)
-        )
-    # NEWEST cluster first: the tape/feed renders newest-first, and a single sweep may
-    # not drain a large unscored backlog — so score what users actually SEE first,
-    # instead of the old rowid (oldest-first) order that left recent clusters (the
-    # visible tape) unscored behind the archive. Full-rescore passes are unaffected.
-    stmt = stmt.order_by(Cluster.created_at.desc())
-    clusters = session.execute(stmt).scalars().all()
-
     n = 0
     try:
+        taxonomy = taxonomy or load_taxonomy()
+        tiers = tiers or load_source_tiers()
+        stmt = select(Cluster)
+        if only_unscored:
+            stmt = stmt.outerjoin(
+                ClusterScore, ClusterScore.cluster_id == Cluster.cluster_id
+            ).where(ClusterScore.cluster_id.is_(None))
+        # NEWEST cluster first: the tape/feed renders newest-first, and a single sweep
+        # may not drain a large unscored backlog — so score what users actually SEE
+        # first, instead of the old rowid (oldest-first) order that left recent clusters
+        # (the visible tape) unscored behind the archive. Full-rescore is unaffected.
+        stmt = stmt.order_by(Cluster.created_at.desc())
+        clusters = session.execute(stmt).scalars().all()
+
         # Build (cluster_id, origin) rows, RESILIENT to a cluster whose origin is
         # missing or can't be canonicalized. That from_raw_item() call used to run
         # here UNGUARDED — one malformed origin threw BEFORE any scoring, aborting the
