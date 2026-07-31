@@ -70,19 +70,41 @@ const LABEL_Y = 98; // hour tick row
 const C = {
   grid: "#232a38",
   divider: "#171d28", // subtle midnight day-boundary
-  axis: "#5a6478",
-  struct: "#3e4656",
-  social: "#4fd1c5",
+  axis: "#8b94a7", // hour-tick labels — tape.muted, matched up for readability
+  text: "#b9c0cf", // date-boundary labels — tape.sub, same token as the price-chart axis
+  struct: "#3e4656", // tape.dim — structured (RSS/SEC/FDA) bar segment
+  social: "#4fd1c5", // tape.accent — social (Reddit/Bluesky) bar segment
   dim: "#5a6478",
 };
 
 function fmtHour(ms: number): string {
   return `${String(new Date(ms).getHours()).padStart(2, "0")}:00`;
 }
+function fmtDate(ms: number): string {
+  return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
 function fmtFull(ms: number): string {
   const d = new Date(ms);
   const day = d.toLocaleDateString(undefined, { weekday: "short" });
   return `${day} ${fmtHour(ms)}`;
+}
+
+/** Small color key for the stacked bars, sat in the panel header (see
+ * TickerDetailBody). Swatch fills are the EXACT bar segment colors; the labels
+ * use tape.sub so they clear the a11y contrast bar on the dark panel. */
+export function DensityLegend() {
+  return (
+    <span className="flex items-center gap-x-2.5 tape-mono text-[10px] text-tape-sub">
+      <span className="flex items-center gap-1">
+        <span aria-hidden className="inline-block h-2 w-2.5 rounded-[1px]" style={{ background: C.struct }} />
+        news
+      </span>
+      <span className="flex items-center gap-1">
+        <span aria-hidden className="inline-block h-2 w-2.5 rounded-[1px]" style={{ background: C.social }} />
+        social
+      </span>
+    </span>
+  );
 }
 
 export default function IntradayDensity({ buckets }: { buckets: HourBucket[] }) {
@@ -101,13 +123,24 @@ export default function IntradayDensity({ buckets }: { buckets: HourBucket[] }) 
   const vMax = Math.max(1, ...buckets.map((b) => b.struct + b.social));
   const vh = (v: number) => (v / vMax) * (BOT - TOP);
 
-  // Hour ticks: ~6-7 evenly spaced across the window so labels actually VARY.
-  // (The old 3-label start/mid/end sampling of a 48h window showed "12:00"
-  // three times — 0h/24h/48h are the same clock hour.)
+  // X-axis, price-chart style: date markers anchor each day boundary and hour
+  // ticks fill the gaps — mirroring the price chart's time axis, which swaps the
+  // clock time for the date when a bar crosses midnight. Day anchors were the
+  // thing the bare "HH:00 ×6" axis was missing on the 48h view.
   const step = Math.max(1, Math.round((n - 1) / 6));
-  const tickIdx: number[] = [];
-  for (let i = 0; i < n; i += step) tickIdx.push(i);
-  if (tickIdx[tickIdx.length - 1] !== n - 1) tickIdx.push(n - 1);
+  const hourIdx: number[] = [];
+  for (let i = 0; i < n; i += step) hourIdx.push(i);
+  if (hourIdx[hourIdx.length - 1] !== n - 1) hourIdx.push(n - 1);
+  // Precise day boundaries: buckets that start at local midnight.
+  const dateIdx = buckets
+    .map((b, i) => (new Date(b.hour).getHours() === 0 ? i : -1))
+    .filter((i) => i > 0 && i < n);
+  // Drop hour ticks that would collide with a date marker (keep the date).
+  const nearDate = (i: number) => dateIdx.some((d) => Math.abs(d - i) < step / 2);
+  const hourTicks = hourIdx.filter((i) => !nearDate(i));
+  const allTicks = [...hourTicks, ...dateIdx];
+  const anchor = (i: number) => (i <= 0 ? "start" : i >= n - 1 ? "end" : "middle");
+  const clampX = (i: number) => Math.max(L, Math.min(W - R, cx(i)));
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ maxHeight: 128 }}>
@@ -139,17 +172,36 @@ export default function IntradayDensity({ buckets }: { buckets: HourBucket[] }) 
         );
       })}
 
-      {tickIdx.map((i, k) => (
+      {/* tick marks on the baseline (price-chart axis convention) */}
+      {allTicks.map((i) => (
+        <line key={`tk-${i}`} x1={cx(i)} y1={BOT} x2={cx(i)} y2={BOT + 3} stroke={C.axis} />
+      ))}
+      {/* hour labels fill the gaps */}
+      {hourTicks.map((i) => (
         <text
           key={`ht-${i}`}
-          x={Math.max(L, Math.min(W - R, cx(i)))}
+          x={clampX(i)}
           y={LABEL_Y}
-          textAnchor={k === 0 ? "start" : k === tickIdx.length - 1 ? "end" : "middle"}
-          fontSize="8.5"
+          textAnchor={anchor(i)}
+          fontSize="9"
           fill={C.axis}
           className="tape-mono"
         >
           {fmtHour(buckets[i].hour)}
+        </text>
+      ))}
+      {/* date markers at day boundaries — brighter (tape.sub), like the price axis */}
+      {dateIdx.map((i) => (
+        <text
+          key={`dt-${i}`}
+          x={clampX(i)}
+          y={LABEL_Y}
+          textAnchor={anchor(i)}
+          fontSize="9"
+          fill={C.text}
+          className="tape-mono"
+        >
+          {fmtDate(buckets[i].hour)}
         </text>
       ))}
     </svg>

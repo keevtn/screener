@@ -37,6 +37,14 @@ const C = {
 function ts(d: string): number {
   return new Date(d + "T00:00:00Z").getTime();
 }
+function fmtDate(d: string): string {
+  // "Jul 31" — same MMM-d convention as the price / intraday-density axes.
+  return new Date(d + "T00:00:00Z").toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
 
 export default function TickerChart({ attention }: { attention: AttentionPoint[] }) {
   if (attention.length === 0) {
@@ -72,7 +80,12 @@ export default function TickerChart({ attention }: { attention: AttentionPoint[]
     .map((a) => `${x(a.date).toFixed(1)},${sy(attnSentiment(a.sentiment as number, a.struct + a.social)).toFixed(1)}`)
     .join(" ");
 
-  const dateIdx = [0, Math.floor(attention.length / 2), attention.length - 1];
+  // Evenly-spaced date ticks (~6) so the shared x-axis reads like the price /
+  // intraday-density axes rather than just three endpoints.
+  const dStep = Math.max(1, Math.round((attention.length - 1) / 5));
+  const dateIdx: number[] = [];
+  for (let i = 0; i < attention.length; i += dStep) dateIdx.push(i);
+  if (dateIdx[dateIdx.length - 1] !== attention.length - 1) dateIdx.push(attention.length - 1);
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ maxHeight: 280 }}>
@@ -137,20 +150,25 @@ export default function TickerChart({ attention }: { attention: AttentionPoint[]
         />
       ))}
 
-      {/* shared x date axis */}
-      {dateIdx.map((i, k) => (
-        <text
-          key={`xdate-${k}`}
-          x={Math.max(L, Math.min(W - R, x(attention[i].date)))}
-          y={H - 3}
-          textAnchor={k === 0 ? "start" : k === dateIdx.length - 1 ? "end" : "middle"}
-          fontSize="9"
-          fill={C.axis}
-          className="tape-mono"
-        >
-          {attention[i].date}
-        </text>
-      ))}
+      {/* shared x date axis — tick marks on the sentiment baseline + MMM-d labels */}
+      {dateIdx.map((i, k) => {
+        const px = Math.max(L, Math.min(W - R, x(attention[i].date)));
+        return (
+          <g key={`xdate-${k}`}>
+            <line x1={px} y1={S_BOT} x2={px} y2={S_BOT + 3} stroke={C.axis} />
+            <text
+              x={px}
+              y={H - 3}
+              textAnchor={k === 0 ? "start" : k === dateIdx.length - 1 ? "end" : "middle"}
+              fontSize="9"
+              fill={C.axis}
+              className="tape-mono"
+            >
+              {fmtDate(attention[i].date)}
+            </text>
+          </g>
+        );
+      })}
     </svg>
   );
 }

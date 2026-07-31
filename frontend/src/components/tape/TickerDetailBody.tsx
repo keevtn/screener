@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import TickerChart from "@/components/tape/TickerChart";
 import PriceChart from "@/components/tape/PriceChart";
 import IntradayDensity, {
+  DensityLegend,
   hourlyBuckets,
   messageTotals,
   type HourBucket,
@@ -353,6 +354,7 @@ export default function TickerDetailBody({ ticker }: { ticker: string }) {
                     </button>
                   ))}
                 </div>
+                <DensityLegend />
                 {/* 24h / 48h message totals — toggle-independent; moved OUT of the
                     SVG so tall bars can never cover it (the reported overlap). */}
                 <div className="ml-auto flex flex-wrap items-center justify-end gap-x-3 gap-y-0.5 tabular-nums">
