@@ -1,0 +1,13 @@
+# Keep the shipped graph config (graph.json) tracked; ignore local/per-user state
+# so opening the vault in Obsidian never dirties the repo.
+workspace.json
+workspace-mobile.json
+workspace*.json
+cache
+appearance.json
+core-plugins.json
+community-plugins.json
+hotkeys.json
+plugins/
+themes/
+snippets/

@@ -1,0 +1,121 @@
+{
+  "collapse-filter": true,
+  "search": "",
+  "showTags": false,
+  "showAttachments": false,
+  "hideUnresolved": false,
+  "showOrphans": true,
+  "collapse-color-groups": false,
+  "colorGroups": [
+    {
+      "query": "path:\"00 Spine\"",
+      "color": {
+        "a": 1,
+        "rgb": 14707829
+      }
+    },
+    {
+      "query": "path:\"01 Ingest\"",
+      "color": {
+        "a": 1,
+        "rgb": 15048764
+      }
+    },
+    {
+      "query": "path:\"02 Enrich\"",
+      "color": {
+        "a": 1,
+        "rgb": 15127116
+      }
+    },
+    {
+      "query": "path:\"03 Score\"",
+      "color": {
+        "a": 1,
+        "rgb": 10011513
+      }
+    },
+    {
+      "query": "path:\"04 Signal\"",
+      "color": {
+        "a": 1,
+        "rgb": 5682882
+      }
+    },
+    {
+      "query": "path:\"05 Grade\"",
+      "color": {
+        "a": 1,
+        "rgb": 6402031
+      }
+    },
+    {
+      "query": "path:\"06 Gates\"",
+      "color": {
+        "a": 1,
+        "rgb": 13007069
+      }
+    },
+    {
+      "query": "path:\"07 Trader\"",
+      "color": {
+        "a": 1,
+        "rgb": 13736550
+      }
+    },
+    {
+      "query": "path:\"08 Panel\"",
+      "color": {
+        "a": 1,
+        "rgb": 8368233
+      }
+    },
+    {
+      "query": "path:\"09 Agents\"",
+      "color": {
+        "a": 1,
+        "rgb": 5219281
+      }
+    },
+    {
+      "query": "path:\"10 Marketdata\"",
+      "color": {
+        "a": 1,
+        "rgb": 10190558
+      }
+    },
+    {
+      "query": "path:\"11 API\"",
+      "color": {
+        "a": 1,
+        "rgb": 11558092
+      }
+    },
+    {
+      "query": "path:\"12 Tables\"",
+      "color": {
+        "a": 1,
+        "rgb": 9212992
+      }
+    },
+    {
+      "query": "path:\"13 Ops\"",
+      "color": {
+        "a": 1,
+        "rgb": 6054768
+      }
+    }
+  ],
+  "collapse-display": true,
+  "showArrow": true,
+  "textFadeMultiplier": 0,
+  "nodeSizeMultiplier": 1,
+  "lineSizeMultiplier": 1,
+  "collapse-forces": true,
+  "centerStrength": 0.5,
+  "repelStrength": 10,
+  "linkStrength": 1,
+  "linkDistance": 250,
+  "scale": 1,
+  "close": true
+}

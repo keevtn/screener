@@ -62,6 +62,26 @@ grading, attention rollup) on a slower cadence. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the data flow and the load-bearing
 invariants.
 
+## Architecture map — Obsidian vault
+
+The full pipeline is also encoded as a navigable knowledge graph in
+[`docs/architecture-vault`](docs/architecture-vault) — **133 linked notes**: ~90
+pipeline **features** (one per real function/class) + **27 table hubs** + per-stage
+index notes. Every feature note carries a `file.py:symbol` **anchor**, a
+plain-language **purpose**, and its **dependencies stated in words** — what it
+*receives from* upstream and *feeds* downstream, and via which table. Tables are the
+hub nodes, so the graph reads **feature → table → feature**, tracing a headline all
+the way to an issued prediction.
+
+**Open it in Obsidian (free):**
+
+1. Install [Obsidian](https://obsidian.md).
+2. **File → Open vault → "Open folder as vault"**, and select `docs/architecture-vault`.
+3. Start at **"TAPE — START HERE"** — the one-breath summary plus links to each stage index in pipeline order.
+4. Open **Graph view** to see the whole pipeline; stages come **pre-colored** by folder (if your Obsidian ignores the shipped `.obsidian/graph.json`, the color-group queries are listed in **"README - graph setup"** inside the vault).
+
+The notes are plain Markdown, so the vault is fully browsable **directly on GitHub** — no Obsidian required; you just lose the interactive graph.
+
 ## Tech stack
 
 - **Backend/pipeline** — Python 3.12, SQLAlchemy 2.0 over **SQLite** (WAL + append-only
