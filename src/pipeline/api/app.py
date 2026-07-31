@@ -1329,6 +1329,49 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
                 _resolve = _json.loads(_sp.read_text())
         except Exception:  # noqa: BLE001
             _resolve = None
+        # News-feed join diagnostic: the tape shows sentiment only when a raw_item is
+        # the ORIGIN of a cluster that has a ClusterScore with a non-null finbert_score
+        # (pipeline/aggregate/news.py). Replicate that exact join on the newest items so
+        # a "scores exist but the tape shows none" gap is a single read: is it an
+        # unscored-recent-clusters problem, an LM-only (null finbert) problem, or a join
+        # gap? Totals bound it (scores frozen null forever under only_unscored).
+        _join: dict[str, Any] = {}
+        try:
+            from pipeline.common.models import Cluster as _Cl
+
+            _cs_total = session.execute(select(func.count()).select_from(_CS)).scalar_one()
+            _cs_fin = session.execute(
+                select(func.count()).select_from(_CS).where(_CS.finbert_score.is_not(None))
+            ).scalar_one()
+            _rids = session.execute(
+                select(RawItem.id).order_by(RawItem.published_at.desc()).limit(200)
+            ).scalars().all()
+            _ocid = {
+                oid: cid
+                for oid, cid in session.execute(
+                    select(_Cl.origin_item_id, _Cl.cluster_id).where(
+                        _Cl.origin_item_id.in_(_rids)
+                    )
+                )
+            }
+            _rcids = list(_ocid.values())
+            _r_scored = _r_fin = 0
+            if _rcids:
+                for _cid, _fin in session.execute(
+                    select(_CS.cluster_id, _CS.finbert_score).where(_CS.cluster_id.in_(_rcids))
+                ):
+                    _r_scored += 1
+                    if _fin is not None:
+                        _r_fin += 1
+            _join = {
+                "cluster_scores_total": _cs_total,
+                "cluster_scores_finbert_nonnull": _cs_fin,
+                "recent200_origin_clusters": len(_rcids),  # recent items that ARE cluster origins
+                "recent200_with_score_row": _r_scored,  # of those, how many have a score row
+                "recent200_with_finbert": _r_fin,  # of those, how many carry finbert (=> tape shows it)
+            }
+        except Exception:  # noqa: BLE001 — diagnostic must never 500 /health
+            _join = {}
         scoring = {
             "sentiment_mode": _os.environ.get("SENTIMENT_MODE", "lexicon"),
             "finbert_url_set": bool(_os.environ.get("FINBERT_ONNX_URL")),
@@ -1336,6 +1379,7 @@ def create_app(engine: Engine | None = None, *, llm_client: LLMClient | None = N
             "cluster_scores_recent": len(_recent),
             "finbert_scores_recent": sum(1 for s in _recent if s is not None),
             "finbert_resolve": _resolve,  # {mode, active, error, probe_score} or null
+            **_join,
         }
 
         # --- mount diagnostics -------------------------------------------------
